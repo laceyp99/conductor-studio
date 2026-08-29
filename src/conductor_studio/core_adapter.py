@@ -400,6 +400,20 @@ class CoreAdapter:
         midi_path = self._absolute_artifact(slot.artifacts.midi)
         if midi_path is None:
             slot.audio.state = AudioState.UNAVAILABLE
+            slot.audio.failure = FailureInfo(
+                category=ErrorCategory.AUDIO,
+                message="The saved MIDI artifact is unavailable for audio rendering.",
+                retryable=False,
+            )
+            return None
+        available, readiness_message = self.audio_readiness()
+        if not available:
+            slot.audio.state = AudioState.UNAVAILABLE
+            slot.audio.failure = FailureInfo(
+                category=ErrorCategory.AUDIO,
+                message=readiness_message,
+                retryable=False,
+            )
             return None
         output_path = self.slot_root(slot_id) / "rerendered.mp3"
         slot.audio.state = AudioState.RENDERING
@@ -434,6 +448,15 @@ class CoreAdapter:
             slot.audio.failure = failure
             return None
 
+    def audio_readiness(self) -> tuple[bool, str]:
+        """Return a safe, actionable view of Core playback readiness."""
+        return _playback_readiness(self.playback, self.default_soundfont_path)
+
+    @staticmethod
+    def system_audio_readiness() -> tuple[bool, str]:
+        """Inspect the pinned Core playback toolchain without rendering audio."""
+        return _playback_readiness(playback, None)
+
     rerender = rerender_audio
 
     def _absolute_artifact(self, relative: str) -> Path | None:
@@ -443,6 +466,40 @@ class CoreAdapter:
             return candidate
         except (OSError, ValueError):
             return None
+
+
+def _playback_readiness(
+    playback_api: Any, soundfont: str | Path | None
+) -> tuple[bool, str]:
+    """Normalize Core readiness into messages safe to display and persist."""
+    checker = getattr(playback_api, "is_playback_available", None)
+    if not callable(checker):
+        return True, "Audio playback is ready."
+    if soundfont is None and hasattr(playback_api, "get_default_soundfont"):
+        soundfont = playback_api.get_default_soundfont()
+    try:
+        available, detail = checker(soundfont)
+    except Exception:
+        return (
+            False,
+            "Audio playback is unavailable. Check FluidSynth, FFmpeg, and the SoundFont setup.",
+        )
+    if available:
+        return True, "Audio playback is ready."
+    lowered = str(detail or "").lower()
+    missing_fluidsynth = "fluidsynth" in lowered
+    missing_ffmpeg = "ffmpeg" in lowered
+    if missing_fluidsynth and missing_ffmpeg:
+        message = "Audio unavailable — install FluidSynth and FFmpeg and ensure both are on PATH."
+    elif missing_fluidsynth:
+        message = "Audio unavailable — install FluidSynth and ensure it is on PATH. MIDI is ready."
+    elif missing_ffmpeg:
+        message = "Audio unavailable — install FFmpeg and ensure it is on PATH. MIDI is ready."
+    elif "soundfont" in lowered or ".sf2" in lowered:
+        message = "Audio unavailable — the configured SoundFont could not be found. MIDI is ready."
+    else:
+        message = "Audio playback is unavailable. Check FluidSynth, FFmpeg, and the SoundFont setup."
+    return False, message
 
 
 __all__ = ["AdapterFailure", "CoreAdapter", "NormalizedResult"]

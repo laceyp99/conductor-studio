@@ -140,3 +140,42 @@ def test_audio_only_rerender_never_calls_generation(tmp_path) -> None:
     relative = adapter.rerender_audio(manifest, "04")
     assert relative == "variants/04/core/rerendered.mp3"
     assert slot.audio.state is AudioState.READY
+
+
+def test_audio_preflight_skips_renderer_and_reports_missing_tool(tmp_path) -> None:
+    session_root = tmp_path.resolve()
+    midi = session_root / "variants" / "01" / "core" / "gen_x" / "loop.mid"
+    midi.parent.mkdir(parents=True)
+    midi.write_bytes(b"MThd")
+
+    class UnavailablePlayback:
+        render_calls = 0
+
+        @staticmethod
+        def get_default_soundfont():
+            return "packaged.sf2"
+
+        @staticmethod
+        def is_playback_available(soundfont):
+            assert soundfont == "packaged.sf2"
+            return False, "FluidSynth is not installed or not in PATH"
+
+        @classmethod
+        def midi_to_mp3(cls, *args, **kwargs):
+            cls.render_calls += 1
+            raise AssertionError("renderer must not run after a failed preflight")
+
+    manifest = _manifest()
+    slot = manifest.slot("01")
+    slot.midi = MidiState.READY
+    slot.artifacts.midi = "variants/01/core/gen_x/loop.mid"
+    adapter = CoreAdapter(session_root, playback_factory=UnavailablePlayback)
+
+    assert adapter.rerender_audio(manifest, "01") is None
+    assert UnavailablePlayback.render_calls == 0
+    assert slot.midi is MidiState.READY
+    assert slot.audio.state is AudioState.UNAVAILABLE
+    assert slot.audio.failure is not None
+    assert slot.audio.failure.retryable is False
+    assert "install FluidSynth" in slot.audio.failure.message
+    assert str(tmp_path) not in slot.audio.failure.message

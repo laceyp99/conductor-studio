@@ -22,10 +22,12 @@ _CSS = """
 :root { --studio-ink: #10141d; --studio-panel: #171d29; --studio-line: #344156; }
 body { background: var(--studio-ink); }
 #studio-shell { max-width: 1440px; margin: 0 auto; }
-#variant-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+#variant-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 1rem; align-items: start; }
+#variant-grid > .variant-card { width: 100% !important; min-width: 0 !important; flex: none !important; }
 .variant-card { min-width: 0 !important; border: 1px solid var(--studio-line); border-radius: 14px; padding: 1rem; background: var(--studio-panel); }
+.piano-roll img { object-fit: contain !important; background: #10141d; }
 .eyebrow { letter-spacing: .12em; text-transform: uppercase; color: #7f8ba0; font-size: .74rem; }
-@media (max-width: 820px) { #variant-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 820px) { #variant-grid { grid-template-columns: minmax(0, 1fr) !important; } }
 """
 _UNSET = object()
 
@@ -131,11 +133,18 @@ def _card_view(
     warning_parts = [*slot.warnings]
     if slot.failure is not None:
         warning_parts.append(slot.failure.message)
-    audio_retry = slot.midi is MidiState.READY and slot.audio.state in {
-        AudioState.FAILED,
-        AudioState.UNAVAILABLE,
-        AudioState.INTERRUPTED,
-    }
+    if slot.audio.failure is not None:
+        warning_parts.append(slot.audio.failure.message)
+    audio_retry = (
+        slot.midi is MidiState.READY
+        and slot.audio.state
+        in {
+            AudioState.FAILED,
+            AudioState.UNAVAILABLE,
+            AudioState.INTERRUPTED,
+        }
+        and (slot.audio.failure is None or slot.audio.failure.retryable)
+    )
     return CardView(
         slot_id=slot.slot_id,
         title=f"Variant {int(slot.slot_id)}",
@@ -343,6 +352,13 @@ class StudioController:
             )
         )
 
+    @staticmethod
+    def audio_status() -> str:
+        from .core_adapter import CoreAdapter
+
+        ready, message = CoreAdapter.system_audio_readiness()
+        return "Audio preview: ready." if ready else message
+
     def save_credentials(
         self, openai: str, anthropic: str, google: str, ollama: str
     ) -> CredentialView:
@@ -452,14 +468,27 @@ def _control_values(view: ControlView) -> tuple[Any, Any, Any]:
 
 
 def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
-    with gr.Column(elem_classes=["variant-card"], key=f"card-{slot_id}"):
+    with gr.Column(elem_classes=["variant-card"], key=f"card-{slot_id}", min_width=0):
         gr.Markdown(f"### Variant {int(slot_id)}")
         status = gr.Markdown("Waiting")
         progress = gr.Markdown("Queued")
         metadata = gr.Markdown("Parameters will appear here.")
         warning = gr.Markdown(visible=False)
-        image = gr.Image(type="filepath", interactive=False, buttons=[], height=210)
-        audio = gr.Audio(type="filepath", interactive=False, buttons=[])
+        gr.Markdown("Piano roll · 4 bars · color intensity follows velocity")
+        image = gr.Image(
+            type="filepath",
+            interactive=False,
+            buttons=["download", "fullscreen"],
+            height=400,
+            label=f"Piano roll for Variant {int(slot_id)}",
+            elem_classes=["piano-roll"],
+        )
+        audio = gr.Audio(
+            type="filepath",
+            interactive=False,
+            buttons=["download"],
+            label=f"Audio preview for Variant {int(slot_id)}",
+        )
         midi = gr.DownloadButton("Download MIDI", visible=False)
         with gr.Row():
             favorite = gr.Button("☆ Favorite", size="sm", interactive=False)
@@ -517,7 +546,6 @@ def create_app(
     )
 
     with gr.Blocks(title="Conductor Studio", analytics_enabled=False) as app:
-        gr.HTML(f"<style>{_CSS}</style>", visible=False)
         with gr.Column(elem_id="studio-shell"):
             gr.Markdown(
                 "# Conductor Studio\n### Four ideas. One prompt. Pick the one that moves."
@@ -607,6 +635,7 @@ def create_app(
                     credential_notice = gr.Markdown(
                         controller.credentials_view().status
                     )
+                    gr.Markdown(controller.audio_status())
                     ollama_notice = gr.Markdown()
 
         card_output_components = []

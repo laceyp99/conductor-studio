@@ -7,6 +7,8 @@ import pytest
 
 from conductor_studio.models import (
     AudioState,
+    ErrorCategory,
+    FailureInfo,
     MidiState,
     Progress,
     SessionSettings,
@@ -26,6 +28,7 @@ class FakeAdapter:
         self.fail_slots = set(fail_slots)
         self.delay = delay
         self.calls: list[str] = []
+        self.audio_calls: list[str] = []
         self.lock = threading.Lock()
 
     def generate_slot(self, manifest, slot_id, *, render_audio, progress_callback):
@@ -43,8 +46,15 @@ class FakeAdapter:
         return SimpleNamespace(midi_path=slot.artifacts.midi)
 
     def rerender_audio(self, manifest, slot_id):
-        manifest.slot(slot_id).audio.state = AudioState.READY
-        return f"variants/{slot_id}/core/loop.mp3"
+        self.audio_calls.append(slot_id)
+        relative = f"variants/{slot_id}/core/loop.mp3"
+        output = self.root / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"ID3")
+        slot = manifest.slot(slot_id)
+        slot.artifacts.audio = relative
+        slot.audio.state = AudioState.READY
+        return relative
 
 
 def test_four_workers_partial_failure_and_terminal_unlock(tmp_path):
@@ -184,3 +194,40 @@ def test_midi_is_durable_before_slow_audio_rendering_finishes(tmp_path):
     completed = service.wait(created.session_id)
     assert all(slot.midi is MidiState.READY for slot in completed.slots)
     assert service.generation_active is False
+
+
+def test_audio_retry_uses_only_existing_midi_and_persists_audio(tmp_path):
+    adapters = []
+
+    def factory(root, credentials):
+        adapter = FakeAdapter(root)
+        adapters.append(adapter)
+        return adapter
+
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(store=store, adapter_factory=factory)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    slot = completed.slot("01")
+    slot.artifacts.audio = None
+    slot.audio.state = AudioState.FAILED
+    slot.audio.failure = FailureInfo(
+        category=ErrorCategory.AUDIO,
+        message="Audio rendering failed.",
+        retryable=True,
+    )
+    store.save(completed)
+
+    service.retry_audio(created.session_id, "01")
+    retried = service.wait(created.session_id)
+
+    retry_adapter = adapters[-1]
+    retried_slot = retried.slot("01")
+    assert retry_adapter.calls == []
+    assert retry_adapter.audio_calls == ["01"]
+    assert retried_slot.midi is MidiState.READY
+    assert retried_slot.audio.state is AudioState.READY
+    assert retried_slot.artifacts.audio == "variants/01/core/loop.mp3"
+    session_root = store.sessions_root / created.session_id
+    assert (session_root / retried_slot.artifacts.audio).exists()
+    assert service.active_session_id is None

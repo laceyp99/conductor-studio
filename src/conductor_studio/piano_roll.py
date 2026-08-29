@@ -203,6 +203,26 @@ def _pitch_label(midi: int) -> str:
     return f"{names[midi % 12]}{midi // 12 - 1}"
 
 
+def _pitch_bounds(notes: Sequence[_RenderedNote]) -> tuple[int, int]:
+    """Frame played notes with context while retaining a readable minimum span."""
+    if not notes:
+        return MIDI_MIN, MIDI_MAX
+    lower = min(note.midi for note in notes) - 5
+    upper = max(note.midi for note in notes) + 5
+    minimum_span = 24
+    if upper - lower < minimum_span:
+        missing = minimum_span - (upper - lower)
+        lower -= missing // 2
+        upper += missing - missing // 2
+    if lower < MIDI_MIN:
+        upper = min(MIDI_MAX, upper - lower)
+        lower = MIDI_MIN
+    if upper > MIDI_MAX:
+        lower = max(MIDI_MIN, lower - (upper - MIDI_MAX))
+        upper = MIDI_MAX
+    return lower, upper
+
+
 def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
     notes = _notes(loop)
     figure = Figure(figsize=(width, height), dpi=dpi, facecolor="#10141d")
@@ -211,15 +231,21 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
         axis = figure.add_subplot(111)
         axis.set_facecolor("#171d29")
         axis.set_xlim(0, LOOP_SIXTEENTHS)
-        axis.set_ylim(-0.5, MIDI_MAX + 0.5)
+        pitch_min, pitch_max = _pitch_bounds(notes)
+        axis.set_ylim(pitch_min - 0.5, pitch_max + 0.5)
         axis.set_xticks((8, 24, 40, 56), ("BAR 1", "BAR 2", "BAR 3", "BAR 4"))
-        y_ticks = tuple(range(0, MIDI_MAX + 1, 12))
+        played_pitches = {note.midi for note in notes}
+        y_ticks = tuple(
+            pitch
+            for pitch in range(pitch_min, pitch_max + 1)
+            if pitch % 12 == 0 or pitch in played_pitches
+        )
         axis.set_yticks(y_ticks, tuple(_pitch_label(note) for note in y_ticks))
         axis.set_xlabel(
             "Four-bar timeline · sixteenth-note resolution", color="#aab4c5"
         )
         axis.set_ylabel("Pitch", color="#aab4c5")
-        axis.tick_params(colors="#aab4c5", labelsize=8)
+        axis.tick_params(colors="#c8d2e3", labelsize=9)
         for spine in axis.spines.values():
             spine.set_color("#3b4657")
 
@@ -237,8 +263,13 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
                 linewidth=1.1,
                 zorder=1,
             )
-        for pitch in range(MIDI_MIN, MIDI_MAX + 1, 12):
-            axis.axhline(pitch, color="#344156", linewidth=0.55, zorder=0)
+        for pitch in range(pitch_min, pitch_max + 1):
+            axis.axhline(
+                pitch,
+                color="#45536a" if pitch % 12 == 0 else "#253044",
+                linewidth=0.7 if pitch % 12 == 0 else 0.3,
+                zorder=0,
+            )
 
         cmap = matplotlib.colormaps["viridis"]
         for note in notes:
@@ -250,9 +281,9 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
                     note.end - note.start,
                     0.84,
                     facecolor=color,
-                    edgecolor="#d9f7ff",
-                    linewidth=0.35,
-                    alpha=0.55 + 0.4 * velocity_fraction,
+                    edgecolor="#effcff",
+                    linewidth=0.75,
+                    alpha=0.82 + 0.18 * velocity_fraction,
                     joinstyle="round",
                     zorder=2,
                 )
@@ -260,7 +291,7 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
         if not notes:
             axis.text(
                 LOOP_SIXTEENTHS / 2,
-                (MIDI_MAX - MIDI_MIN) / 2,
+                (pitch_max + pitch_min) / 2,
                 "No notes in this loop",
                 color="#7f8ba0",
                 ha="center",
@@ -284,8 +315,8 @@ def render_loop(
     loop: Any,
     output_path: str | Path,
     *,
-    width: float = 10.0,
-    height: float = 4.8,
+    width: float = 12.0,
+    height: float = 6.0,
     dpi: int = 144,
 ) -> Path:
     """Render ``loop`` to a deterministic PNG and atomically replace the target.

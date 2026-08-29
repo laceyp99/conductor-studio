@@ -36,7 +36,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(warning, file=sys.stderr)
         logging.getLogger("conductor_studio").warning(warning)
 
-    from conductor_studio.app import create_app
+    from conductor_studio.app import _CSS, create_app
 
     # Blocks starts its analytics/version-check thread in ``__init__``.  Set
     # the documented environment switch before construction so no telemetry
@@ -63,4 +63,5 @@ def main(argv: Sequence[str] | None = None) -> None:
         enable_monitoring=False,
         allowed_paths=[str(served_root)],
         blocked_paths=[str(studio_root / "sessions"), str(studio_root / "trash")],
+        head=f"<style>{_CSS}</style>",
     )

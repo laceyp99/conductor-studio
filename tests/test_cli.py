@@ -1,6 +1,7 @@
 import os
 
 from conductor_studio import cli
+from conductor_studio.app import _CSS
 
 
 class FakeApp:
@@ -41,6 +42,7 @@ def test_main_launches_localhost_with_contained_file_policy(
             str((tmp_path / "studio" / "sessions").resolve()),
             str((tmp_path / "studio" / "trash").resolve()),
         ],
+        "head": f"<style>{_CSS}</style>",
     }
     served = tmp_path / "studio" / "served"
     assert served.is_dir()

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from conductor_studio.piano_roll import _notes, render_loop
+from conductor_studio.piano_roll import _notes, _pitch_bounds, render_loop
 
 
 def _loop_payload(*, notes: list[dict] | None = None) -> dict:
@@ -39,8 +39,8 @@ def test_render_loop_writes_valid_nonempty_png_and_is_deterministic(tmp_path: Pa
     assert first.read_bytes() == second.read_bytes()
     with Image.open(first) as image:
         assert image.format == "PNG"
-        assert image.width > 100
-        assert image.height > 100
+        assert image.width >= 1_700
+        assert image.height >= 850
         assert len(image.getcolors(maxcolors=image.width * image.height)) > 10
 
 
@@ -67,6 +67,33 @@ def test_render_loop_supports_gemini_words_and_clips_sustain():
     assert len(notes) == 1
     assert notes[0].start == 15
     assert notes[0].end == 64
+
+
+def test_pitch_bounds_focus_on_notes_with_two_octaves_of_context():
+    notes = _notes(
+        _loop_payload(
+            notes=[
+                {
+                    "pitch": "C",
+                    "octave": 4,
+                    "velocity": 100,
+                    "time": {"start_beat": 1, "duration": 4},
+                },
+                {
+                    "pitch": "G",
+                    "octave": 4,
+                    "velocity": 100,
+                    "time": {"start_beat": 5, "duration": 4},
+                },
+            ]
+        )
+    )
+
+    lower, upper = _pitch_bounds(notes)
+
+    assert upper - lower == 24
+    assert lower <= 60 <= upper
+    assert lower <= 67 <= upper
 
 
 def test_render_loop_empty_loop_has_valid_axis_artifact_and_closes_figures(tmp_path):
