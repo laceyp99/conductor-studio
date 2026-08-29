@@ -255,10 +255,6 @@ class StudioController:
         while self.service.active_session_id == session_id:
             for event in self.service.events(session_id, timeout=0.25):
                 yield self._view(event.manifest, enabled=False)
-                if event.manifest.terminal:
-                    break
-            if self.service.store.load(session_id).terminal:
-                break
         try:
             final = self.service.wait(session_id)
         except Exception:
@@ -289,34 +285,34 @@ class StudioController:
                 self._settings(prompt, key, scale, provider, model, thinking, effort)
             )
             yield from self._stream_session(manifest.session_id, manifest)
-        except Exception as exc:
+        except Exception:
             yield AppView(
                 None,
                 tuple(_empty_card(slot) for slot in VariantSlot.SLOT_IDS),
                 True,
-                f"Generation could not start: {type(exc).__name__}: {exc}",
+                "Generation could not start. Check the selected model and settings.",
             )  # type: ignore[arg-type]
 
     def retry(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
             manifest = self.service.retry(session_id, [slot_id])
             yield from self._stream_session(session_id, manifest)
-        except Exception as exc:
+        except Exception:
             yield self._view(
                 self.service.store.load(session_id),
                 enabled=True,
-                notice=f"Retry failed: {exc}",
+                notice="Retry could not start. Check provider readiness and try again.",
             )
 
     def retry_audio(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
             manifest = self.service.retry_audio(session_id, slot_id)
             yield from self._stream_session(session_id, manifest)
-        except Exception as exc:
+        except Exception:
             yield self._view(
                 self.service.store.load(session_id),
                 enabled=True,
-                notice=f"Audio retry failed: {exc}",
+                notice="Audio retry could not start. Check the local audio tools.",
             )
 
     def toggle_favorite(self, session_id: str, slot_id: str) -> AppView:
@@ -790,7 +786,7 @@ def create_app(
         refresh_ollama.click(
             lambda host: _ollama_values(controller, host),
             ollama_host,
-            [model, ollama_notice],
+            [provider, model, ollama_notice],
             api_visibility="private",
         )
 
@@ -798,10 +794,14 @@ def create_app(
     return app
 
 
-def _ollama_values(controller: StudioController, host: str) -> tuple[Any, str]:
+def _ollama_values(controller: StudioController, host: str) -> tuple[Any, Any, str]:
     """Adapt one readiness refresh into the model dropdown and its notice."""
     controls, notice = controller.refresh_ollama(host)
-    return _control_values(controls)[0], notice
+    provider_update = _update(
+        choices=list(controller.catalog.providers()),
+        value="Ollama" if controls.model_choices else None,
+    )
+    return provider_update, _control_values(controls)[0], notice
 
 
 __all__ = [

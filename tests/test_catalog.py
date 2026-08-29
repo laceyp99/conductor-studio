@@ -82,7 +82,7 @@ def test_unreachable_ollama_is_nonfatal_and_has_no_models() -> None:
     status = catalog.refresh_ollama()
     assert status.available is False
     assert status.models == ()
-    assert "TimeoutError" in (status.error or "")
+    assert status.error == "Ollama readiness failed (TimeoutError)."
     assert "Ollama" not in catalog.providers()
 
 

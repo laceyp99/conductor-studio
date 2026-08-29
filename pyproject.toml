@@ -9,8 +9,8 @@ description = "A local-first four-variant comparison studio for Conductor Core"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "conductor-core[playback,providers]",
-    "gradio>=5.49,<7",
+    "conductor-core[playback,providers] @ git+https://github.com/laceyp99/conductor-core.git@068b85d7471602a2cf18476d5207c466f088bf41",
+    "gradio==6.26.0",
     "matplotlib>=3.9,<4",
     "pydantic>=2.11,<3",
 ]
@@ -27,11 +27,11 @@ dev = [
 [tool.uv]
 required-version = ">=0.12.6"
 
-[tool.uv.sources]
-conductor-core = { git = "https://github.com/laceyp99/conductor-core.git", rev = "068b85d7471602a2cf18476d5207c466f088bf41" }
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/conductor_studio"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

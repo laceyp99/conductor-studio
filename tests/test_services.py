@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from conductor_studio.models import MidiState, Progress, SessionSettings, SlotState
+from conductor_studio.models import (
+    AudioState,
+    MidiState,
+    Progress,
+    SessionSettings,
+    SlotState,
+)
 from conductor_studio.services import ActiveSessionError, StudioService
 from conductor_studio.storage import SessionStore
 
@@ -37,7 +43,7 @@ class FakeAdapter:
         return SimpleNamespace(midi_path=slot.artifacts.midi)
 
     def rerender_audio(self, manifest, slot_id):
-        manifest.slot(slot_id).audio.state = "ready"
+        manifest.slot(slot_id).audio.state = AudioState.READY
         return f"variants/{slot_id}/core/loop.mp3"
 
 
@@ -140,3 +146,41 @@ def test_success_persists_loop_and_piano_roll_without_affecting_midi(tmp_path):
         assert slot.state is SlotState.SUCCEEDED
         assert slot.artifacts.loop == f"variants/{slot.slot_id}/loop.json"
         assert slot.artifacts.piano_roll == (f"variants/{slot.slot_id}/piano-roll.png")
+
+
+def test_midi_is_durable_before_slow_audio_rendering_finishes(tmp_path):
+    audio_started = threading.Event()
+    release_audio = threading.Event()
+
+    class SlowAudioAdapter(FakeAdapter):
+        def generate_slot(self, manifest, slot_id, *, render_audio, progress_callback):
+            assert render_audio is False
+            result = super().generate_slot(
+                manifest,
+                slot_id,
+                render_audio=render_audio,
+                progress_callback=progress_callback,
+            )
+            result.loop = {"bars": []}
+            return result
+
+        def rerender_audio(self, manifest, slot_id):
+            audio_started.set()
+            assert release_audio.wait(3)
+            return super().rerender_audio(manifest, slot_id)
+
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(
+        store=store,
+        adapter_factory=lambda root, credentials: SlowAudioAdapter(root),
+        renderer=lambda loop, output: Path(output),
+    )
+    created = service.create_session(settings())
+    assert audio_started.wait(3)
+    during_audio = store.load(created.session_id)
+    assert any(slot.midi is MidiState.READY for slot in during_audio.slots)
+    assert service.generation_active is True
+    release_audio.set()
+    completed = service.wait(created.session_id)
+    assert all(slot.midi is MidiState.READY for slot in completed.slots)
+    assert service.generation_active is False

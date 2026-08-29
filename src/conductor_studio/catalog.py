@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from conductor_core import music
 
@@ -224,6 +225,18 @@ def _invoke_loader(loader: Callable[..., Any], host: str, timeout: float) -> Any
     return loader(**accepted)
 
 
+def _safe_host_label(value: str) -> str:
+    """Return an origin-only host label without userinfo, query, or fragments."""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme and parsed.hostname:
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            return f"{parsed.scheme}://{parsed.hostname}{port}"
+    except (TypeError, ValueError):
+        pass
+    return "configured host"
+
+
 class ModelCatalog:
     """Validated cloud catalog with opt-in, refreshable Ollama discovery."""
 
@@ -321,7 +334,10 @@ class ModelCatalog:
         except Exception as exc:  # local readiness must never break cloud UI
             self._ollama = ()
             self._ollama_status = OllamaReadiness(
-                False, (), selected_host, f"{type(exc).__name__}: {exc}"[:500]
+                False,
+                (),
+                _safe_host_label(selected_host),
+                f"Ollama readiness failed ({type(exc).__name__}).",
             )
             return self._ollama_status
         if not isinstance(raw_status, Mapping):
@@ -346,8 +362,8 @@ class ModelCatalog:
         self._ollama_status = OllamaReadiness(
             available=available,
             models=tuple(model_ids) if available else (),
-            host=str(raw_status.get("host") or selected_host),
-            error=error[:500] if error else None,
+            host=_safe_host_label(str(raw_status.get("host") or selected_host)),
+            error="Ollama is unavailable at the configured host." if error else None,
         )
         self._ollama = tuple(
             ModelCapability(

@@ -32,7 +32,7 @@ from .models import (
     VariantSlot,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore, StorageError
+from .storage import SessionStore
 from .variation import create_manifest
 
 
@@ -82,6 +82,7 @@ class StudioService:
         self._active_session_id: str | None = None
         self._executors: dict[str, ThreadPoolExecutor] = {}
         self._futures: dict[str, dict[str, Future[Any]]] = {}
+        self._remaining: dict[str, int] = {}
         self._adapters: dict[str, Any] = {}
         self._callbacks: dict[str, list[EventCallback]] = {}
         self._events: dict[str, Queue[ServiceEvent]] = {}
@@ -278,7 +279,7 @@ class StudioService:
             # data; the merge below persists it immediately on return.
             local = self.store.load(session_id)
             result = adapter.generate_slot(
-                local, slot_id, render_audio=True, progress_callback=progress_callback
+                local, slot_id, render_audio=False, progress_callback=progress_callback
             )
             if result is not None:
                 try:
@@ -291,6 +292,8 @@ class StudioService:
                     )
             self._persist_slot(session_id, local.slot(slot_id))
             self._emit(session_id, slot_id)
+            if result is not None and local.slot(slot_id).midi is MidiState.READY:
+                self._render_audio(session_id, slot_id, adapter)
         except Exception as error:
             with self._coordinator_lock:
                 manifest = self.store.load(session_id)
@@ -312,11 +315,9 @@ class StudioService:
         with self._state_lock:
             if self._active_session_id != session_id:
                 return
-            try:
-                terminal = self.store.load(session_id).terminal
-            except StorageError:
-                terminal = False
-            if terminal:
+            remaining = max(0, self._remaining.get(session_id, 1) - 1)
+            self._remaining[session_id] = remaining
+            if remaining == 0:
                 self._active_session_id = None
 
     def create_session(
@@ -361,6 +362,7 @@ class StudioService:
             )
             self._executors[manifest.session_id] = executor
             self._active_session_id = manifest.session_id
+            self._remaining[manifest.session_id] = len(manifest.slots)
             futures = {
                 slot.slot_id: executor.submit(
                     self._run_slot, manifest.session_id, slot.slot_id, adapter
@@ -375,11 +377,13 @@ class StudioService:
 
     def wait(self, session_id: str, timeout: float | None = None) -> SessionManifest:
         futures = list(self._futures.get(session_id, {}).values())
-        for future in futures:
-            future.result(timeout=timeout)
-        executor = self._executors.pop(session_id, None)
-        if executor is not None:
-            executor.shutdown(wait=True)
+        try:
+            for future in futures:
+                future.result(timeout=timeout)
+        finally:
+            executor = self._executors.pop(session_id, None)
+            if executor is not None:
+                executor.shutdown(wait=True)
         return self.store.load(session_id)
 
     def retry(
@@ -420,6 +424,7 @@ class StudioService:
             )
             self._executors[session_id] = executor
             self._active_session_id = session_id
+            self._remaining[session_id] = len(selected)
             futures: dict[str, Future[Any]] = {}
             for slot_id in selected:
                 slot = manifest.slot(slot_id)
@@ -434,13 +439,14 @@ class StudioService:
             self._futures[session_id] = futures
             return manifest
 
-    def _run_audio_retry(self, session_id: str, slot_id: str, adapter: Any) -> None:
+    def _render_audio(self, session_id: str, slot_id: str, adapter: Any) -> None:
         try:
-            manifest = self.store.load(session_id)
-            slot = manifest.slot(slot_id)
-            slot.audio.state = AudioState.RENDERING
-            manifest.refresh_status()
-            self.store.save(manifest)
+            with self._coordinator_lock:
+                manifest = self.store.load(session_id)
+                slot = manifest.slot(slot_id)
+                slot.audio.state = AudioState.RENDERING
+                manifest.refresh_status()
+                self.store.save(manifest)
             self._emit(session_id, slot_id)
             adapter.rerender_audio(manifest, slot_id)
             slot = manifest.slot(slot_id)
@@ -463,6 +469,10 @@ class StudioService:
                 current.refresh_status()
                 self.store.save(current)
             self._emit(session_id, slot_id)
+
+    def _run_audio_retry(self, session_id: str, slot_id: str, adapter: Any) -> None:
+        try:
+            self._render_audio(session_id, slot_id, adapter)
         finally:
             self._maybe_release_active(session_id)
 
@@ -480,6 +490,7 @@ class StudioService:
             )
             self._executors[session_id] = executor
             self._active_session_id = session_id
+            self._remaining[session_id] = 1
             self._futures[session_id] = {
                 slot_id: executor.submit(
                     self._run_audio_retry, session_id, slot_id, adapter
