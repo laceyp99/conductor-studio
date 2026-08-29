@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import sys
 from collections.abc import Sequence
 
 from conductor_studio.config import LaunchConfig
@@ -24,22 +26,41 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config = LaunchConfig(args.host, args.port, args.allow_network)
-    if config.allow_network and config.host not in {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }:
-        logging.warning(
-            "Conductor Studio has no authentication. Do not expose this server "
-            "to the public internet."
+    if not config.is_loopback:
+        warning = (
+            "WARNING: Conductor Studio has no authentication and is bound to a "
+            "non-loopback address; keep it on a trusted network."
         )
+        # Keep this visible even when the host application has replaced the
+        # root logger or configured logging to discard warnings.
+        print(warning, file=sys.stderr)
+        logging.getLogger("conductor_studio").warning(warning)
 
     from conductor_studio.app import create_app
 
-    app = create_app()
+    # Blocks starts its analytics/version-check thread in ``__init__``.  Set
+    # the documented environment switch before construction so no telemetry
+    # thread starts, then restore a caller-provided value after construction.
+    previous_analytics = os.environ.get("GRADIO_ANALYTICS_ENABLED")
+    os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
+    try:
+        app = create_app()
+    finally:
+        if previous_analytics is None:
+            os.environ.pop("GRADIO_ANALYTICS_ENABLED", None)
+        else:
+            os.environ["GRADIO_ANALYTICS_ENABLED"] = previous_analytics
+    # Gradio 6 exposes analytics on Blocks construction rather than as a
+    # launch kwarg.  The current app factory is intentionally lazy, so set the
+    # flag before launch and also disable monitoring in the supported launch API.
+    app.analytics_enabled = False
+    served_root = config.ensure_served_root()
+    studio_root = served_root.parent
     app.launch(
         server_name=config.host,
         server_port=config.port,
         share=False,
-        show_api=False,
+        enable_monitoring=False,
+        allowed_paths=[str(served_root)],
+        blocked_paths=[str(studio_root / "sessions"), str(studio_root / "trash")],
     )
