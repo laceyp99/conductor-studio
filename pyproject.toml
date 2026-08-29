@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "conductor-studio"
+version = "0.1.0"
+description = "A local-first four-variant comparison studio for Conductor Core"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "conductor-core[playback,providers]",
+    "gradio>=5.49,<7",
+    "matplotlib>=3.9,<4",
+    "pydantic>=2.11,<3",
+]
+
+[project.scripts]
+conductor-studio = "conductor_studio.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "ruff>=0.16,<0.17",
+]
+
+[tool.uv]
+required-version = ">=0.12.6"
+
+[tool.uv.sources]
+conductor-core = { git = "https://github.com/laceyp99/conductor-core.git", rev = "068b85d7471602a2cf18476d5207c466f088bf41" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conductor_studio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ASYNC",
+    "B",
+    "C4",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "FLY",
+    "FURB",
+    "I",
+    "PERF",
+    "PGH",
+    "PIE",
+    "PT",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+    "UP",
+    "W605",
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
