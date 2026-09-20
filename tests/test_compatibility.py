@@ -1,12 +1,16 @@
 """Executable contract checks for the pinned Conductor Core revision."""
 
 from dataclasses import fields
+from importlib.metadata import version
+from inspect import signature
 
 import conductor_core
 from conductor_core import music, playback
 
 
 def test_core_public_contract_is_available() -> None:
+    assert version("conductor-core") == "0.5.3"
+
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
         "key",
@@ -28,6 +32,71 @@ def test_core_public_contract_is_available() -> None:
         "audio_path",
         "warnings",
     } <= result_fields
+
+
+def test_core_variation_contract_is_available() -> None:
+    request_fields = [
+        field.name for field in fields(conductor_core.VariationGenerationRequest)
+    ]
+    assert request_fields == [
+        "key",
+        "scale",
+        "description",
+        "model",
+        "count",
+        "temperature",
+        "use_thinking",
+        "effort",
+        "prompt_override",
+        "render_audio",
+        "soundfont_path",
+    ]
+
+    batch_fields = list(conductor_core.VariationBatchResult.model_fields)
+    assert batch_fields == ["metadata", "items", "status", "diagnostic"]
+
+    item_fields = list(conductor_core.VariationResult.model_fields)
+    assert item_fields == ["index", "loop", "generation", "warnings"]
+    generation_fields = set(conductor_core.GenerationMetadata.model_fields)
+    assert {"id", "midi_path", "audio_path"} <= generation_fields
+
+    progress_fields = [field.name for field in fields(conductor_core.ProgressEvent)]
+    assert progress_fields == [
+        "stage",
+        "message",
+        "detail",
+        "batch_id",
+        "variation_index",
+        "status",
+    ]
+
+    metadata_fields = set(conductor_core.VariationBatchMetadata.model_fields)
+    assert {
+        "batch_id",
+        "requested_count",
+        "received_count",
+        "usage",
+        "cost",
+    } <= metadata_fields
+    assert list(conductor_core.VariationUsage.model_fields) == [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+    ]
+
+    method_signature = signature(
+        conductor_core.LoopGenerationEngine.generate_variations
+    )
+    assert list(method_signature.parameters) == [
+        "self",
+        "request",
+        "progress_callback",
+    ]
+    assert (
+        method_signature.parameters["request"].annotation
+        is conductor_core.VariationGenerationRequest
+    )
+    assert method_signature.return_annotation is conductor_core.VariationBatchResult
 
 
 def test_core_metadata_and_offline_resources_load() -> None:
