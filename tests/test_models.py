@@ -124,6 +124,20 @@ def test_atomic_batch_failure_has_one_sanitized_failure():
         SessionManifest.model_validate(value.model_dump())
 
 
+def test_interruption_is_an_atomic_batch_failure():
+    value = manifest()
+    value.batch.failure = FailureInfo(
+        category=ErrorCategory.INTERRUPTED,
+        message="Generation was interrupted.",
+    )
+    for slot in value.slots:
+        slot.state = SlotState.INTERRUPTED
+    restored = SessionManifest.from_json_bytes(value.json_bytes())
+    assert restored.status.value == "queued"
+    restored.refresh_status()
+    assert restored.status.value == "interrupted"
+
+
 @pytest.mark.parametrize("path", ["/tmp/a.mid", "C:/a.mid", "../a.mid", "a\\b.mid"])
 def test_artifacts_must_be_session_relative(path):
     with pytest.raises(ValidationError):

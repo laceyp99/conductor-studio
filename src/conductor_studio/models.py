@@ -323,10 +323,15 @@ class SessionManifest(BaseModel):
         if states & shared and len(states) != 1:
             raise ValueError("shared batch states must be atomic")
         if self.batch.failure:
-            if states != {SlotState.FAILED}:
-                raise ValueError("batch failure must fail all slots")
-        elif states == {SlotState.FAILED}:
-            raise ValueError("failed slots require batch failure")
+            expected = (
+                SlotState.INTERRUPTED
+                if self.batch.failure.category is ErrorCategory.INTERRUPTED
+                else SlotState.FAILED
+            )
+            if states != {expected}:
+                raise ValueError("batch failure state must match all slots")
+        elif states in ({SlotState.FAILED}, {SlotState.INTERRUPTED}):
+            raise ValueError("failed or interrupted slots require batch failure")
         published = bool(self.batch.generation_ids)
         midi = all(
             s.state is SlotState.SUCCEEDED
