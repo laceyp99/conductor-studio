@@ -1,16 +1,9 @@
-"""Durable Studio domain models.
-
-The manifest is deliberately a small, explicit JSON document.  Provider
-objects and credentials do not belong here; only the immutable request
-snapshot, capability decisions, and the durable result of each of the four
-slots are persisted.
-"""
+"""Durable batch-native Studio domain models."""
 
 from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Iterable
 from datetime import datetime, timezone
 from enum import Enum
 from typing import ClassVar
@@ -23,17 +16,10 @@ class _ValueEnum(str, Enum):
         return self.value
 
 
-class Capability(_ValueEnum):
-    SUPPORTED = "supported"
-    UNSUPPORTED = "unsupported"
-    UNKNOWN = "unknown"
-
-
 class SlotState(_ValueEnum):
     QUEUED = "queued"
     GENERATING = "generating"
     PROCESSING_MIDI = "processing_midi"
-    RENDERING_AUDIO = "rendering_audio"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
@@ -42,8 +28,6 @@ class SlotState(_ValueEnum):
 class MidiState(_ValueEnum):
     PENDING = "pending"
     READY = "ready"
-    FAILED = "failed"
-    MISSING = "missing"
 
 
 class AudioState(_ValueEnum):
@@ -59,7 +43,7 @@ class SessionStatus(_ValueEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
-    PARTIAL = "partial"
+    FAILED = "failed"
     INTERRUPTED = "interrupted"
 
 
@@ -79,84 +63,83 @@ def utc_now() -> datetime:
 
 
 def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 class SessionSettings(BaseModel):
-    """The one immutable input snapshot shared by all four calls."""
+    """Immutable controls for the one Core batch request."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-
     prompt: str
     key: str = "C"
     scale: str = "Major"
     provider: str
     model: str
-    thinking: bool = False
+    requested_temperature: float | None = Field(default=0.7, ge=0, le=2)
+    effective_temperature: float | None = Field(default=0.7, ge=0, le=2)
+    extended_thinking: bool = False
     effort: str | None = None
 
     @field_validator("prompt")
     @classmethod
-    def _trim_prompt(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
+    def _prompt(cls, value: str) -> str:
+        if not (value := value.strip()):
             raise ValueError("prompt must not be blank")
         return value
 
     @field_validator("key", "scale", "provider", "model")
     @classmethod
-    def _nonempty_text(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
+    def _text(cls, value: str) -> str:
+        if not (value := value.strip()):
             raise ValueError("setting must not be blank")
         return value
 
-
-class ParameterValue(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    requested: float | int | None = None
-    effective: float | int | None = None
-    capability: Capability = Capability.UNKNOWN
+    @field_validator("effort")
+    @classmethod
+    def _effort(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not (value := value.strip()):
+            raise ValueError("effort must not be blank")
+        return value
 
     @model_validator(mode="after")
-    def _validate_effective(self) -> ParameterValue:
-        if self.capability is Capability.SUPPORTED and self.effective is None:
-            raise ValueError("supported parameter must have an effective value")
-        if self.capability is not Capability.SUPPORTED and self.effective is not None:
-            raise ValueError("unsupported parameter cannot have an effective value")
+    def _controls(self) -> SessionSettings:
+        if (self.requested_temperature is None) != (self.effective_temperature is None):
+            raise ValueError(
+                "requested and effective temperature must both be set or omitted"
+            )
+        if self.effort is not None and self.requested_temperature is not None:
+            raise ValueError("effort and temperature are mutually exclusive")
+        if self.effort is not None and not self.extended_thinking:
+            raise ValueError("effort requires extended thinking")
+        if (
+            self.extended_thinking
+            and self.effort is None
+            and self.effective_temperature != 1.0
+        ):
+            raise ValueError("extended thinking requires effective temperature 1.0")
         return self
-
-
-class SlotParameters(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    temperature: ParameterValue
-    seed: ParameterValue
 
 
 class Progress(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     stage: SlotState
     fraction: float | None = Field(default=None, ge=0, le=1)
     message: str | None = None
 
     @field_validator("message")
     @classmethod
-    def _short_message(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return value[:500]
+    def _message(cls, value):
+        return None if value is None else value[:500]
 
 
 class ArtifactRefs(BaseModel):
-    """Paths relative to the session directory, never arbitrary local paths."""
-
     model_config = ConfigDict(extra="forbid")
-
     midi: str | None = None
     audio: str | None = None
     piano_roll: str | None = None
@@ -164,7 +147,7 @@ class ArtifactRefs(BaseModel):
 
     @field_validator("midi", "audio", "piano_roll", "loop")
     @classmethod
-    def _relative_posix_path(cls, value: str | None) -> str | None:
+    def _path(cls, value: str | None) -> str | None:
         if value is None:
             return None
         if (
@@ -175,146 +158,129 @@ class ArtifactRefs(BaseModel):
             or re.match(r"^[A-Za-z]:", value)
         ):
             raise ValueError("artifact path must be a relative POSIX path")
-        parts = value.split("/")
-        if any(part in {"", ".", ".."} for part in parts):
+        if any(p in {"", ".", ".."} for p in value.split("/")):
             raise ValueError("artifact path contains an invalid component")
         return value
 
 
-class CoreInfo(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    generation_id: str | None = None
-    version: str | None = None
-
-
 class FailureInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     category: ErrorCategory
     message: str
-    retryable: bool = True
 
     @field_validator("message")
     @classmethod
-    def _sanitize_message(cls, value: str) -> str:
-        # The service should redact secrets before constructing this object;
-        # length limiting prevents accidentally persisting huge provider dumps.
-        return value[:2_000]
+    def _safe_message(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("failure message must not be blank")
+        return value[:2000]
+
+
+class BatchRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    core_version: str
+    batch_id: str | None = None
+    generation_ids: list[str] = Field(default_factory=list)
+    total_cost: float | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    failure: FailureInfo | None = None
+
+    @field_validator("core_version")
+    @classmethod
+    def _version(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("core_version must not be blank")
+        return value
+
+    @field_validator("generation_ids")
+    @classmethod
+    def _ids(cls, value: list[str]) -> list[str]:
+        if len(value) not in {0, 4}:
+            raise ValueError("generation_ids must be empty or contain four items")
+        value = [item.strip() for item in value]
+        if any(not item for item in value) or len(set(value)) != len(value):
+            raise ValueError("generation_ids must be nonblank and unique")
+        return value
+
+    @model_validator(mode="after")
+    def _result(self) -> BatchRecord:
+        if self.failure and (self.batch_id or self.generation_ids):
+            raise ValueError("a failed batch cannot publish identifiers")
+        if bool(self.batch_id) != bool(self.generation_ids):
+            raise ValueError("batch and generation identifiers publish together")
+        if (
+            self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens is not None
+            and self.input_tokens + self.output_tokens != self.total_tokens
+        ):
+            raise ValueError("total_tokens must equal input plus output tokens")
+        return self
 
 
 class AudioInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     state: AudioState = AudioState.NOT_ATTEMPTED
     failure: FailureInfo | None = None
+    retryable: bool = False
+
+    @model_validator(mode="after")
+    def _failure(self) -> AudioInfo:
+        failed = self.state in {AudioState.FAILED, AudioState.UNAVAILABLE}
+        if failed != (self.failure is not None):
+            raise ValueError("audio state and failure must agree")
+        if self.retryable and not failed:
+            raise ValueError("only failed audio can be retried")
+        return self
 
 
 class VariantSlot(BaseModel):
-    # A transition updates several related fields (state, MIDI/audio result,
-    # failure, and timestamps) as one domain operation.  The complete object is
-    # validated whenever a manifest is persisted, rather than rejecting the
-    # short-lived intermediate state between individual assignments.
     model_config = ConfigDict(extra="forbid")
-
     slot_id: str
-    parameters: SlotParameters
     state: SlotState = SlotState.QUEUED
     progress: Progress | None = None
-    core: CoreInfo = Field(default_factory=CoreInfo)
     artifacts: ArtifactRefs = Field(default_factory=ArtifactRefs)
     midi: MidiState = MidiState.PENDING
     audio: AudioInfo = Field(default_factory=AudioInfo)
     warnings: list[str] = Field(default_factory=list)
-    failure: FailureInfo | None = None
     favorite: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
     SLOT_IDS: ClassVar[tuple[str, ...]] = ("01", "02", "03", "04")
-    TEMPERATURES: ClassVar[tuple[float, ...]] = (0.2, 0.3, 0.4, 0.5)
 
     @field_validator("slot_id")
     @classmethod
-    def _valid_slot_id(cls, value: str) -> str:
+    def _slot(cls, value):
         if value not in cls.SLOT_IDS:
-            raise ValueError("slot_id must be one of 01, 02, 03, 04")
+            raise ValueError("invalid slot_id")
         return value
 
     @field_validator("warnings")
     @classmethod
-    def _sanitize_warnings(cls, value: list[str]) -> list[str]:
+    def _warnings(cls, value):
         return [item[:500] for item in value]
 
     @model_validator(mode="after")
-    def _state_consistency(self) -> VariantSlot:
-        if self.state is SlotState.SUCCEEDED and self.midi is not MidiState.READY:
-            raise ValueError("a succeeded slot must have valid MIDI")
-        if self.state is SlotState.FAILED and self.failure is None:
-            raise ValueError("a failed slot must have failure details")
-        if (
-            self.state is SlotState.INTERRUPTED
-            and self.failure is not None
-            and self.failure.category is not ErrorCategory.INTERRUPTED
-        ):
-            raise ValueError("interrupted slots require interrupted failure category")
+    def _state(self) -> VariantSlot:
+        succeeded = self.state is SlotState.SUCCEEDED
+        if succeeded != (self.midi is MidiState.READY and bool(self.artifacts.midi)):
+            raise ValueError("MIDI publishes only with a succeeded slot")
+        if self.audio.state is AudioState.READY and not self.artifacts.audio:
+            raise ValueError("ready audio requires an artifact")
+        if self.finished_at is not None and self.state not in TERMINAL_SLOT_STATES:
+            raise ValueError("only terminal slots have finished_at")
         return self
-
-    def transition(
-        self,
-        target: SlotState,
-        *,
-        progress: Progress | None = None,
-        failure: FailureInfo | None = None,
-    ) -> None:
-        if target not in LEGAL_TRANSITIONS[self.state]:
-            raise ValueError(f"illegal slot transition: {self.state} -> {target}")
-        if target is SlotState.FAILED and failure is None:
-            raise ValueError("failed transition requires failure details")
-        self.state = target
-        self.progress = progress or Progress(stage=target)
-        if target is SlotState.GENERATING:
-            self.started_at = utc_now()
-            self.finished_at = None
-            self.failure = None
-        if target in TERMINAL_SLOT_STATES:
-            self.finished_at = utc_now()
-        if target is SlotState.FAILED:
-            assert failure is not None
-            self.failure = failure
-        elif target is SlotState.INTERRUPTED:
-            self.failure = failure or FailureInfo(
-                category=ErrorCategory.INTERRUPTED,
-                message="Generation was interrupted; retry manually.",
-            )
 
 
 TERMINAL_SLOT_STATES = frozenset(
     {SlotState.SUCCEEDED, SlotState.FAILED, SlotState.INTERRUPTED}
 )
-LEGAL_TRANSITIONS: dict[SlotState, frozenset[SlotState]] = {
-    SlotState.QUEUED: frozenset({SlotState.GENERATING, SlotState.INTERRUPTED}),
-    SlotState.GENERATING: frozenset(
-        {SlotState.PROCESSING_MIDI, SlotState.FAILED, SlotState.INTERRUPTED}
-    ),
-    SlotState.PROCESSING_MIDI: frozenset(
-        {
-            SlotState.RENDERING_AUDIO,
-            SlotState.SUCCEEDED,
-            SlotState.FAILED,
-            SlotState.INTERRUPTED,
-        }
-    ),
-    SlotState.RENDERING_AUDIO: frozenset({SlotState.SUCCEEDED, SlotState.INTERRUPTED}),
-    SlotState.SUCCEEDED: frozenset(),
-    SlotState.FAILED: frozenset({SlotState.GENERATING}),
-    SlotState.INTERRUPTED: frozenset({SlotState.GENERATING}),
-}
 
 
 class SessionManifest(BaseModel):
     model_config = ConfigDict(validate_assignment=True, extra="forbid")
-
     schema_version: int = 1
     studio_version: str = "0.1.0"
     session_id: str
@@ -323,129 +289,109 @@ class SessionManifest(BaseModel):
     updated_at: datetime
     status: SessionStatus = SessionStatus.QUEUED
     settings: SessionSettings
+    batch: BatchRecord
     slots: list[VariantSlot]
-
     SCHEMA_VERSION: ClassVar[int] = 1
 
     @field_validator("session_id")
     @classmethod
-    def _safe_session_id(cls, value: str) -> str:
+    def _session_id(cls, value):
         if not re.fullmatch(r"\d{8}-\d{6}_[A-Za-z0-9-]{4,32}", value):
-            raise ValueError("session_id is not a safe Studio folder name")
+            raise ValueError("unsafe session_id")
         return value
 
     @field_validator("created_at", "updated_at")
     @classmethod
-    def _normalize_time(cls, value: datetime) -> datetime:
+    def _time(cls, value):
         return _as_utc(value)
 
     @model_validator(mode="after")
-    def _validate_manifest(self) -> SessionManifest:
+    def _manifest(self) -> SessionManifest:
         if self.schema_version != self.SCHEMA_VERSION:
-            if self.schema_version > self.SCHEMA_VERSION:
-                raise ValueError("unsupported newer manifest schema")
             raise ValueError("unsupported manifest schema")
-        if [slot.slot_id for slot in self.slots] != list(VariantSlot.SLOT_IDS):
-            raise ValueError("manifest must contain exactly four ordered slots")
+        if [s.slot_id for s in self.slots] != list(VariantSlot.SLOT_IDS):
+            raise ValueError("exactly four ordered slots required")
         if self.updated_at < self.created_at:
-            raise ValueError("updated_at cannot precede created_at")
+            raise ValueError("updated_at precedes created_at")
+        states = {s.state for s in self.slots}
+        shared = {
+            SlotState.QUEUED,
+            SlotState.GENERATING,
+            SlotState.FAILED,
+            SlotState.INTERRUPTED,
+        }
+        if states & shared and len(states) != 1:
+            raise ValueError("shared batch states must be atomic")
+        if self.batch.failure:
+            if states != {SlotState.FAILED}:
+                raise ValueError("batch failure must fail all slots")
+        elif states == {SlotState.FAILED}:
+            raise ValueError("failed slots require batch failure")
+        published = bool(self.batch.generation_ids)
+        midi = all(
+            s.state is SlotState.SUCCEEDED
+            and s.midi is MidiState.READY
+            and s.artifacts.midi
+            for s in self.slots
+        )
+        if published != bool(midi):
+            raise ValueError("batch IDs and all MIDI publish atomically")
         return self
 
     @classmethod
     def create(
         cls,
-        settings: SessionSettings,
+        settings,
         *,
-        session_id: str | None = None,
-        title: str | None = None,
-        seeds: Iterable[int | None] | None = None,
-        temperature_capability: Capability = Capability.SUPPORTED,
-        seed_capability: Capability = Capability.SUPPORTED,
-        studio_version: str = "0.1.0",
-        now: datetime | None = None,
-    ) -> SessionManifest:
+        core_version,
+        session_id=None,
+        title=None,
+        studio_version="0.1.0",
+        now=None,
+    ):
         moment = _as_utc(now or utc_now())
-        if session_id is None:
-            session_id = moment.strftime("%Y%m%d-%H%M%S") + "_" + secrets.token_hex(4)
-        if title is None:
-            title = settings.prompt.splitlines()[0].strip()[:80]
-        seed_values = (
-            list(seeds)
-            if seeds is not None
-            else [secrets.randbelow(2**31) for _ in range(4)]
-        )
-        if len(seed_values) != 4:
-            raise ValueError("exactly four seed assignments are required")
-        slots: list[VariantSlot] = []
-        for index, slot_id in enumerate(VariantSlot.SLOT_IDS):
-            temperature = VariantSlot.TEMPERATURES[index]
-            temp_effective = (
-                temperature if temperature_capability is Capability.SUPPORTED else None
-            )
-            seed = (
-                seed_values[index] if seed_capability is Capability.SUPPORTED else None
-            )
-            slots.append(
-                VariantSlot(
-                    slot_id=slot_id,
-                    parameters=SlotParameters(
-                        temperature=ParameterValue(
-                            requested=temperature,
-                            effective=temp_effective,
-                            capability=temperature_capability,
-                        ),
-                        seed=ParameterValue(
-                            requested=seed_values[index]
-                            if seed_capability is Capability.SUPPORTED
-                            else None,
-                            effective=seed,
-                            capability=seed_capability,
-                        ),
-                    ),
-                    progress=Progress(stage=SlotState.QUEUED, fraction=0),
-                )
-            )
+        session_id = session_id or moment.strftime(
+            "%Y%m%d-%H%M%S"
+        ) + "_" + secrets.token_hex(4)
         return cls(
             studio_version=studio_version,
             session_id=session_id,
-            title=title,
+            title=title or settings.prompt.splitlines()[0][:80],
             created_at=moment,
             updated_at=moment,
             settings=settings,
-            slots=slots,
+            batch=BatchRecord(core_version=core_version),
+            slots=[VariantSlot(slot_id=s) for s in VariantSlot.SLOT_IDS],
         )
 
     @property
-    def terminal(self) -> bool:
-        return all(slot.state in TERMINAL_SLOT_STATES for slot in self.slots)
+    def terminal(self):
+        return all(s.state in TERMINAL_SLOT_STATES for s in self.slots)
 
-    def derive_status(self) -> SessionStatus:
-        states = [slot.state for slot in self.slots]
-        if not any(state is not SlotState.QUEUED for state in states):
+    def derive_status(self):
+        states = {s.state for s in self.slots}
+        if states == {SlotState.QUEUED}:
             return SessionStatus.QUEUED
-        if not self.terminal:
-            return SessionStatus.RUNNING
-        if all(state is SlotState.SUCCEEDED for state in states):
-            return SessionStatus.COMPLETED
-        if any(state is SlotState.INTERRUPTED for state in states):
+        if states == {SlotState.FAILED}:
+            return SessionStatus.FAILED
+        if states == {SlotState.INTERRUPTED}:
             return SessionStatus.INTERRUPTED
-        return SessionStatus.PARTIAL
+        return SessionStatus.COMPLETED if self.terminal else SessionStatus.RUNNING
 
-    def refresh_status(self) -> None:
+    def refresh_status(self):
         self.status = self.derive_status()
         self.updated_at = utc_now()
 
-    def slot(self, slot_id: str) -> VariantSlot:
-        for item in self.slots:
-            if item.slot_id == slot_id:
-                return item
+    def slot(self, slot_id):
+        for slot in self.slots:
+            if slot.slot_id == slot_id:
+                return slot
         raise KeyError(slot_id)
 
-    def json_bytes(self) -> bytes:
-        return (self.model_dump_json(indent=2, exclude_none=False) + "\n").encode(
-            "utf-8"
-        )
+    def json_bytes(self):
+        validated = type(self).model_validate(self.model_dump(mode="python"))
+        return (validated.model_dump_json(indent=2, exclude_none=False) + "\n").encode()
 
     @classmethod
-    def from_json_bytes(cls, value: bytes) -> SessionManifest:
+    def from_json_bytes(cls, value):
         return cls.model_validate_json(value)
