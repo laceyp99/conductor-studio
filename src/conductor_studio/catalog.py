@@ -32,8 +32,7 @@ class ModelCapability:
     max_thinking_budget: int | None
     always_on_adaptive_thinking: bool
     temperature_supported: bool
-    temperature_effective: bool
-    seed_supported: bool
+    control_mode: str
     rpm: int | None
     available: bool = True
     readiness: str = "ready"
@@ -49,7 +48,7 @@ class ModelCapability:
 
     @property
     def supports_temperature(self) -> bool:
-        return self.temperature_effective
+        return self.temperature_supported
 
 
 @dataclass(frozen=True)
@@ -105,27 +104,15 @@ def _efforts(config: Mapping[str, Any]) -> tuple[str, ...]:
     return result
 
 
-def _temperature_effective(
-    provider: str,
-    *,
-    thinking_supported: bool,
-    efforts: tuple[str, ...],
-    temperature_supported: bool,
-    always_on_adaptive_thinking: bool,
-) -> bool:
-    """Conservative account of what the pinned Core adapter actually sends."""
-    if not temperature_supported:
-        return False
-    if provider == "OpenAI":
-        # Core sends reasoning.effort for these models, omitting temperature.
-        return not (thinking_supported and efforts)
-    if provider == "Anthropic":
-        # Adaptive/budget thinking can force 1.0 or omit the caller value.
-        return not thinking_supported and not always_on_adaptive_thinking
-    if provider == "Google":
-        return True
-    # Ollama's adapter always sends options.temperature.
-    return True
+def _control_mode(
+    *, thinking_supported: bool, efforts: tuple[str, ...], temperature_supported: bool
+) -> str:
+    """Classify controls exclusively from Core's capability shape."""
+    if efforts:
+        return "effort"
+    if thinking_supported and temperature_supported:
+        return "legacy_thinking"
+    return "temperature"
 
 
 def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapability:
@@ -138,7 +125,6 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
     efforts = _efforts(raw)
     always_on = _bool(raw, "always_on_adaptive_thinking")
     temp_supported = _bool(raw, "temperature_supported", True)
-    seed_supported = _bool(raw, "seed_supported", False)
     rate_limits = raw.get("rate_limits")
     if not isinstance(rate_limits, Mapping):
         raise CatalogError(f"{provider}/{model} must define rate_limits")
@@ -167,16 +153,11 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
         ),
         always_on_adaptive_thinking=always_on,
         temperature_supported=temp_supported,
-        temperature_effective=_temperature_effective(
-            provider,
+        control_mode=_control_mode(
             thinking_supported=thinking,
             efforts=efforts,
             temperature_supported=temp_supported,
-            always_on_adaptive_thinking=always_on,
         ),
-        # The pinned Core revision has no seed capability metadata or request
-        # field.  Missing metadata therefore fails closed to unsupported.
-        seed_supported=seed_supported,
         rpm=rpm,
     )
 
@@ -376,8 +357,7 @@ class ModelCatalog:
                 max_thinking_budget=None,
                 always_on_adaptive_thinking=False,
                 temperature_supported=True,
-                temperature_effective=True,
-                seed_supported=False,
+                control_mode="temperature",
                 rpm=None,
                 available=True,
             )

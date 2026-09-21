@@ -3,7 +3,7 @@ import pytest
 from conductor_studio.catalog import CatalogError, ModelCatalog
 
 
-def _model(*, thinking=False, efforts=None, temp=True, seed=False, rpm=10):
+def _model(*, thinking=False, efforts=None, temp=True, rpm=10):
     config = {
         "extended_thinking": thinking,
         "max_tokens": 100,
@@ -13,8 +13,6 @@ def _model(*, thinking=False, efforts=None, temp=True, seed=False, rpm=10):
         config["effort_options"] = efforts
     if not temp:
         config["temperature_supported"] = False
-    if seed:
-        config["seed_supported"] = True
     return config
 
 
@@ -34,16 +32,25 @@ def _info():
     }
 
 
-def test_cloud_catalog_is_normalized_and_temperature_is_honest() -> None:
+def test_cloud_catalog_classifies_controls_only_from_capabilities() -> None:
     catalog = ModelCatalog(model_info_loader=_info)
     assert catalog.providers() == ("OpenAI", "Google", "Anthropic")
     assert [item.model for item in catalog.models("OpenAI")] == ["gpt-5", "gpt-4.1"]
 
-    assert catalog.lookup("OpenAI", "gpt-5").temperature_effective is False
-    assert catalog.lookup("OpenAI", "gpt-5").seed_supported is False
-    assert catalog.lookup("OpenAI", "gpt-4.1").temperature_effective is True
-    assert catalog.lookup("Google", "gemini").temperature_effective is False
-    assert catalog.lookup("Anthropic", "claude").temperature_effective is False
+    assert catalog.lookup("OpenAI", "gpt-5").control_mode == "effort"
+    assert catalog.lookup("OpenAI", "gpt-4.1").control_mode == "temperature"
+    assert catalog.lookup("Google", "gemini").control_mode == "effort"
+    assert catalog.lookup("Anthropic", "claude").control_mode == "effort"
+
+
+def test_legacy_mode_is_capability_shaped_without_provider_branching() -> None:
+    info = _info()
+    info["models"]["Google"]["legacy"] = _model(thinking=True)
+    info["models"]["Anthropic"]["legacy"] = _model(thinking=True)
+    catalog = ModelCatalog(model_info_loader=lambda: info)
+
+    assert catalog.lookup("Google", "legacy").control_mode == "legacy_thinking"
+    assert catalog.lookup("Anthropic", "legacy").control_mode == "legacy_thinking"
 
 
 def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
@@ -69,8 +76,8 @@ def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
     assert status.models == ("llama3",)
     assert catalog.providers()[-1] == "Ollama"
     model = catalog.lookup("Ollama", "llama3")
-    assert model.temperature_effective is True
-    assert model.seed_supported is False
+    assert model.control_mode == "temperature"
+    assert not hasattr(model, "seed_supported")
     assert model.rpm is None
 
 

@@ -1,4 +1,4 @@
-"""Gradio Blocks presentation and testable Studio handlers."""
+"""Gradio presentation and testable Studio handlers."""
 
 from __future__ import annotations
 
@@ -18,18 +18,18 @@ from .models import (
     VariantSlot,
 )
 
-_CSS = """
-:root { --studio-ink: #10141d; --studio-panel: #171d29; --studio-line: #344156; }
-body { background: var(--studio-ink); }
-#studio-shell { max-width: 1440px; margin: 0 auto; }
-#variant-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 1rem; align-items: start; }
-#variant-grid > .variant-card { width: 100% !important; min-width: 0 !important; flex: none !important; }
-.variant-card { min-width: 0 !important; border: 1px solid var(--studio-line); border-radius: 14px; padding: 1rem; background: var(--studio-panel); }
-.piano-roll img { object-fit: contain !important; background: #10141d; }
-.eyebrow { letter-spacing: .12em; text-transform: uppercase; color: #7f8ba0; font-size: .74rem; }
-@media (max-width: 820px) { #variant-grid { grid-template-columns: minmax(0, 1fr) !important; } }
-"""
+DEFAULT_TEMPERATURE = 0.7
 _UNSET = object()
+_CSS = """
+:root { --studio-ink:#10141d; --studio-panel:#171d29; --studio-line:#344156; }
+body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:0 auto; }
+#variant-grid { display:grid !important; grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:1rem; align-items:start; }
+#variant-grid > .variant-card { width:100% !important; min-width:0 !important; flex:none !important; }
+.variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
+.piano-roll img { object-fit:contain !important; background:#10141d; }
+.accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
+@media (max-width:820px) { #variant-grid { grid-template-columns:minmax(0,1fr) !important; } }
+"""
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,6 @@ class CardView:
     metadata: str
     warning: str
     favorite_label: str
-    retry_visible: bool
     audio_retry_visible: bool
 
 
@@ -54,6 +53,8 @@ class AppView:
     cards: tuple[CardView, CardView, CardView, CardView]
     generate_enabled: bool = True
     notice: str = ""
+    accounting: str = "Cost unavailable"
+    batch_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,8 +68,13 @@ class LibraryView:
 class ControlView:
     model_choices: tuple[str, ...]
     model_value: str | None
+    mode: str
+    temperature_value: float
+    requested_temperature: float
+    temperature_visible: bool
+    temperature_interactive: bool
     thinking_visible: bool
-    thinking_interactive: bool
+    thinking_value: bool
     effort_choices: tuple[str, ...]
     effort_value: str | None
     effort_visible: bool
@@ -82,85 +88,90 @@ class CredentialView:
 
 def _empty_card(slot_id: str) -> CardView:
     return CardView(
-        slot_id=slot_id,
-        title=f"Variant {int(slot_id)}",
-        status="Waiting",
-        progress="Queued",
-        image_path=None,
-        audio_path=None,
-        midi_path=None,
-        metadata="Parameters will appear here.",
-        warning="",
-        favorite_label="☆ Favorite",
-        retry_visible=False,
-        audio_retry_visible=False,
+        slot_id,
+        f"Variant {int(slot_id)}",
+        "Waiting",
+        "Queued",
+        None,
+        None,
+        None,
+        "Parameters will appear here.",
+        "",
+        "☆ Favorite",
+        False,
     )
 
 
-def _slot_metadata(slot: VariantSlot) -> str:
-    temperature = slot.parameters.temperature
-    seed = slot.parameters.seed
-    temperature_text = (
-        f"temperature {temperature.effective:g}"
-        if temperature.effective is not None
-        else "temperature unsupported"
+def _slot_metadata(manifest: SessionManifest) -> str:
+    settings = manifest.settings
+    control = (
+        f"effort {settings.effort}"
+        if settings.effort
+        else (
+            f"temperature {settings.effective_temperature:g}"
+            if settings.effective_temperature is not None
+            else "temperature unavailable"
+        )
     )
-    seed_text = (
-        f"seed {seed.effective}" if seed.effective is not None else "seed unsupported"
-    )
-    return f"{temperature_text} · {seed_text}"
+    return f"{settings.provider} · {settings.model} · {control}"
 
 
 def _card_view(
-    manifest: SessionManifest,
-    slot: VariantSlot,
-    published: dict[str, Path | None],
+    manifest: SessionManifest, slot: VariantSlot, published: dict[str, Path | None]
 ) -> CardView:
     progress = slot.progress
-    fraction = ""
-    if progress is not None and progress.fraction is not None:
-        fraction = f" · {round(progress.fraction * 100):d}%"
-    message = progress.message if progress and progress.message else ""
+    fraction = (
+        f" · {round(progress.fraction * 100):d}%"
+        if progress and progress.fraction is not None
+        else ""
+    )
     status = {
         SlotState.QUEUED: "Queued",
-        SlotState.GENERATING: "Generating",
+        SlotState.GENERATING: "Generating variations",
         SlotState.PROCESSING_MIDI: "Processing MIDI",
-        SlotState.RENDERING_AUDIO: "Rendering audio",
         SlotState.SUCCEEDED: "Ready",
         SlotState.FAILED: "Failed",
         SlotState.INTERRUPTED: "Interrupted",
     }[slot.state]
-    warning_parts = [*slot.warnings]
-    if slot.failure is not None:
-        warning_parts.append(slot.failure.message)
-    if slot.audio.failure is not None:
-        warning_parts.append(slot.audio.failure.message)
-    audio_retry = (
+    warnings = [*slot.warnings]
+    if slot.audio.failure:
+        warnings.append(slot.audio.failure.message)
+    retry_audio = (
         slot.midi is MidiState.READY
         and slot.audio.state
-        in {
-            AudioState.FAILED,
-            AudioState.UNAVAILABLE,
-            AudioState.INTERRUPTED,
-        }
-        and (slot.audio.failure is None or slot.audio.failure.retryable)
+        in {AudioState.FAILED, AudioState.UNAVAILABLE, AudioState.INTERRUPTED}
+        and slot.audio.retryable
     )
     return CardView(
-        slot_id=slot.slot_id,
-        title=f"Variant {int(slot.slot_id)}",
-        status=status,
-        progress=f"{message or status}{fraction}",
-        image_path=str(published["piano_roll"])
-        if published.get("piano_roll")
-        else None,
-        audio_path=str(published["audio"]) if published.get("audio") else None,
-        midi_path=str(published["midi"]) if published.get("midi") else None,
-        metadata=_slot_metadata(slot),
-        warning="\n".join(dict.fromkeys(warning_parts)),
-        favorite_label="★ Favorited" if slot.favorite else "☆ Favorite",
-        retry_visible=slot.state in {SlotState.FAILED, SlotState.INTERRUPTED},
-        audio_retry_visible=audio_retry,
+        slot.slot_id,
+        f"Variant {int(slot.slot_id)}",
+        status,
+        f"{progress.message if progress and progress.message else status}{fraction}",
+        str(published["piano_roll"]) if published.get("piano_roll") else None,
+        str(published["audio"]) if published.get("audio") else None,
+        str(published["midi"]) if published.get("midi") else None,
+        _slot_metadata(manifest),
+        "\n".join(dict.fromkeys(warnings)),
+        "★ Favorited" if slot.favorite else "☆ Favorite",
+        retry_audio,
     )
+
+
+def _accounting(manifest: SessionManifest) -> str:
+    batch = manifest.batch
+    parts = [
+        f"Cost ${batch.total_cost:.6f}"
+        if batch.total_cost is not None
+        else "Cost unavailable"
+    ]
+    for label, value in (
+        ("Input", batch.input_tokens),
+        ("Output", batch.output_tokens),
+        ("Total", batch.total_tokens),
+    ):
+        if value is not None:
+            parts.append(f"{label} {value:,} tokens")
+    return " · ".join(parts)
 
 
 def _view_for_manifest(
@@ -174,49 +185,42 @@ def _view_for_manifest(
     cards = []
     for slot in manifest.slots:
         published = {"piano_roll": None, "audio": None, "midi": None}
-        if publisher is not None and store is not None:
+        if publisher and store:
             with suppress(Exception):
                 published = publisher.publish_slot(store, manifest, slot)
         cards.append(_card_view(manifest, slot, published))
-    cards.extend(_empty_card(slot_id) for slot_id in VariantSlot.SLOT_IDS[len(cards) :])
     return AppView(
-        session_id=manifest.session_id,
-        cards=tuple(cards[:4]),  # type: ignore[arg-type]
-        generate_enabled=manifest.terminal
-        if generate_enabled is None
-        else generate_enabled,
-        notice=notice,
-    )
+        manifest.session_id,
+        tuple(cards),
+        manifest.terminal if generate_enabled is None else generate_enabled,
+        notice,
+        _accounting(manifest),
+        manifest.batch.failure.message if manifest.batch.failure else "",
+    )  # type: ignore[arg-type]
 
 
 def _library_view(service: Any) -> LibraryView:
-    history_choices = tuple(
-        (
-            f"{manifest.title} · {manifest.created_at:%Y-%m-%d %H:%M}",
-            manifest.session_id,
-        )
-        for manifest in service.history()
+    history = tuple(
+        (f"{m.title} · {m.created_at:%Y-%m-%d %H:%M}", m.session_id)
+        for m in service.history()
     )
-    favorite_choices = tuple(
-        (
-            f"{manifest.title} · Variant {int(slot_id)}",
-            f"{manifest.session_id}|{slot_id}",
-        )
-        for manifest, slot_id in service.favorites()
+    favorites = tuple(
+        (f"{m.title} · Variant {int(slot)}", f"{m.session_id}|{slot}")
+        for m, slot in service.favorites()
     )
-    return LibraryView(history_choices, favorite_choices)
+    return LibraryView(history, favorites)
 
 
 class StudioController:
-    """Value-only event surface around a StudioService instance."""
-
     def __init__(
         self, service: Any, catalog: Any, credentials: Any, publisher: MediaPublisher
     ) -> None:
-        self.service = service
-        self.catalog = catalog
-        self.credentials = credentials
-        self.publisher = publisher
+        self.service, self.catalog, self.credentials, self.publisher = (
+            service,
+            catalog,
+            credentials,
+            publisher,
+        )
 
     def _view(
         self, manifest: SessionManifest, *, enabled: bool, notice: str = ""
@@ -244,17 +248,40 @@ class StudioController:
         scale: str,
         provider: str,
         model: str,
+        temperature: float,
+        requested_temperature: float,
         thinking: bool,
         effort: str | None,
     ) -> SessionSettings:
+        mode = self.catalog.lookup(provider, model).control_mode
+        if mode == "effort":
+            return SessionSettings(
+                prompt=prompt,
+                key=key,
+                scale=scale,
+                provider=provider,
+                model=model,
+                requested_temperature=None,
+                effective_temperature=None,
+                extended_thinking=True,
+                effort=effort,
+            )
+        requested = (
+            requested_temperature
+            if mode == "legacy_thinking" and thinking
+            else temperature
+        )
         return SessionSettings(
             prompt=prompt,
             key=key,
             scale=scale,
             provider=provider,
             model=model,
-            thinking=bool(thinking),
-            effort=effort or None,
+            requested_temperature=requested,
+            effective_temperature=1.0
+            if mode == "legacy_thinking" and thinking
+            else temperature,
+            extended_thinking=mode == "legacy_thinking" and thinking,
         )
 
     def _stream_session(
@@ -277,46 +304,44 @@ class StudioController:
         scale: str,
         provider: str,
         model: str,
+        temperature: float,
+        requested_temperature: float,
         thinking: bool,
         effort: str | None,
     ) -> Iterator[AppView]:
-        error = self.validate_prompt(prompt)
-        if error:
+        if error := self.validate_prompt(prompt):
             yield AppView(
-                None,
-                tuple(_empty_card(slot) for slot in VariantSlot.SLOT_IDS),
-                True,
-                error,
+                None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), True, error
             )  # type: ignore[arg-type]
             return
         try:
             manifest = self.service.create_session(
-                self._settings(prompt, key, scale, provider, model, thinking, effort)
+                self._settings(
+                    prompt,
+                    key,
+                    scale,
+                    provider,
+                    model,
+                    temperature,
+                    requested_temperature,
+                    thinking,
+                    effort,
+                )
             )
             yield from self._stream_session(manifest.session_id, manifest)
         except Exception:
             yield AppView(
                 None,
-                tuple(_empty_card(slot) for slot in VariantSlot.SLOT_IDS),
+                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
                 True,
                 "Generation could not start. Check the selected model and settings.",
             )  # type: ignore[arg-type]
 
-    def retry(self, session_id: str, slot_id: str) -> Iterator[AppView]:
-        try:
-            manifest = self.service.retry(session_id, [slot_id])
-            yield from self._stream_session(session_id, manifest)
-        except Exception:
-            yield self._view(
-                self.service.store.load(session_id),
-                enabled=True,
-                notice="Retry could not start. Check provider readiness and try again.",
-            )
-
     def retry_audio(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
-            manifest = self.service.retry_audio(session_id, slot_id)
-            yield from self._stream_session(session_id, manifest)
+            yield from self._stream_session(
+                session_id, self.service.retry_audio(session_id, slot_id)
+            )
         except Exception:
             yield self._view(
                 self.service.store.load(session_id),
@@ -344,11 +369,10 @@ class StudioController:
         return _library_view(self.service)
 
     def credentials_view(self) -> CredentialView:
-        statuses = self.credentials.statuses()
         return CredentialView(
             ", ".join(
-                f"{status.provider.title()}: {status.label()}"
-                for status in statuses.values()
+                f"{s.provider.title()}: {s.label()}"
+                for s in self.credentials.statuses().values()
             )
         )
 
@@ -376,35 +400,80 @@ class StudioController:
             self.credentials.clear_override(provider)
         return self.credentials_view()
 
-    def control_view(self, provider: str, model: str | None = None) -> ControlView:
+    def control_view(
+        self,
+        provider: str,
+        model: str | None = None,
+        *,
+        previous_mode: str | None = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        requested_temperature: float = DEFAULT_TEMPERATURE,
+        thinking: bool = False,
+        effort: str | None = None,
+    ) -> ControlView:
         capabilities = tuple(self.catalog.models(provider))
-        choices = tuple(capability.model for capability in capabilities)
+        choices = tuple(item.model for item in capabilities)
         selected = model if model in choices else (choices[0] if choices else None)
         capability = next(
             (item for item in capabilities if item.model == selected), None
         )
-        efforts = tuple(capability.effort_options) if capability else ()
+        if capability is None:
+            return ControlView(
+                choices,
+                selected,
+                "temperature",
+                0.7,
+                0.7,
+                False,
+                False,
+                False,
+                False,
+                (),
+                None,
+                False,
+            )
+        mode, efforts = capability.control_mode, tuple(capability.effort_options)
+        selected_effort = (
+            effort
+            if previous_mode == "effort" and effort in efforts
+            else (efforts[0] if efforts else None)
+        )
+        if mode == "effort":
+            temperature = requested_temperature = DEFAULT_TEMPERATURE
+            thinking = False
+        elif mode == "temperature":
+            if previous_mode != "temperature":
+                temperature = requested_temperature = DEFAULT_TEMPERATURE
+            thinking = False
+        else:
+            thinking = thinking if previous_mode == "legacy_thinking" else False
+            if previous_mode == "temperature":
+                requested_temperature = temperature
+            elif previous_mode != "legacy_thinking":
+                requested_temperature = DEFAULT_TEMPERATURE
+            temperature = 1.0 if thinking else requested_temperature
         return ControlView(
             choices,
             selected,
-            bool(capability and capability.thinking_supported),
-            bool(capability and capability.thinking_supported),
+            mode,
+            temperature,
+            requested_temperature,
+            mode != "effort",
+            mode != "legacy_thinking" or not thinking,
+            mode == "legacy_thinking",
+            thinking,
             efforts,
-            efforts[0] if efforts else None,
-            bool(efforts),
+            selected_effort,
+            mode == "effort",
         )
 
     def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
         readiness = self.catalog.refresh_ollama(host or None)
-        control = self.control_view("Ollama")
-        if readiness.available:
-            return (
-                control,
-                f"Ollama ready · {len(readiness.models)} model(s) discovered.",
-            )
-        return (
-            control,
-            f"Ollama unavailable: {readiness.error or 'check the configured host.'}",
+        view = self.control_view("Ollama")
+        return view, (
+            f"Ollama ready · {len(readiness.models)} model(s) discovered."
+            if readiness.available
+            else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
         )
 
 
@@ -430,21 +499,20 @@ def _view_values(view: AppView) -> list[Any]:
                 _update(card.midi_path, visible=bool(card.midi_path)),
                 _update(card.favorite_label, interactive=view.generate_enabled),
                 _update(
-                    "Retry",
-                    visible=card.retry_visible,
-                    interactive=view.generate_enabled,
-                ),
-                _update(
                     "Retry audio",
                     visible=card.audio_retry_visible,
                     interactive=view.generate_enabled,
                 ),
             ]
         )
-    values.extend(
-        [view.session_id, view.notice, _update(interactive=view.generate_enabled)]
-    )
-    return values
+    return [
+        *values,
+        view.session_id,
+        view.notice,
+        view.accounting,
+        _update(view.batch_error, visible=bool(view.batch_error)),
+        _update(interactive=view.generate_enabled),
+    ]
 
 
 def _library_values(view: LibraryView) -> tuple[Any, Any, str]:
@@ -455,25 +523,33 @@ def _library_values(view: LibraryView) -> tuple[Any, Any, str]:
     )
 
 
-def _control_values(view: ControlView) -> tuple[Any, Any, Any]:
+def _control_values(view: ControlView) -> tuple[Any, ...]:
     return (
         _update(choices=list(view.model_choices), value=view.model_value),
-        _update(visible=view.thinking_visible, interactive=view.thinking_interactive),
+        _update(
+            view.temperature_value,
+            visible=view.temperature_visible,
+            interactive=view.temperature_interactive,
+        ),
+        view.requested_temperature,
+        _update(view.thinking_value, visible=view.thinking_visible),
         _update(
             choices=list(view.effort_choices),
             value=view.effort_value,
             visible=view.effort_visible,
         ),
+        view.mode,
     )
 
 
 def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
     with gr.Column(elem_classes=["variant-card"], key=f"card-{slot_id}", min_width=0):
         gr.Markdown(f"### Variant {int(slot_id)}")
-        status = gr.Markdown("Waiting")
-        progress = gr.Markdown("Queued")
-        metadata = gr.Markdown("Parameters will appear here.")
-        warning = gr.Markdown(visible=False)
+        status, progress = gr.Markdown("Waiting"), gr.Markdown("Queued")
+        metadata, warning = (
+            gr.Markdown("Parameters will appear here."),
+            gr.Markdown(visible=False),
+        )
         gr.Markdown("Piano roll · 4 bars · color intensity follows velocity")
         image = gr.Image(
             type="filepath",
@@ -491,9 +567,10 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         )
         midi = gr.DownloadButton("Download MIDI", visible=False)
         with gr.Row():
-            favorite = gr.Button("☆ Favorite", size="sm", interactive=False)
-            retry = gr.Button("Retry", size="sm", visible=False)
-            audio_retry = gr.Button("Retry audio", size="sm", visible=False)
+            favorite, audio_retry = (
+                gr.Button("☆ Favorite", size="sm", interactive=False),
+                gr.Button("Retry audio", size="sm", visible=False),
+            )
     return {
         "status": status,
         "progress": progress,
@@ -503,7 +580,6 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         "audio": audio,
         "midi": midi,
         "favorite": favorite,
-        "retry": retry,
         "audio_retry": audio_retry,
     }
 
@@ -516,14 +592,12 @@ def create_app(
     """Create the fixed-topology Studio Blocks app without launching a server."""
     import gradio as gr
 
-    if credentials is None and service is not None:
-        credentials = getattr(service, "credentials", None)
+    credentials = credentials or getattr(service, "credentials", None)
     if credentials is None:
         from .credentials import CredentialStore
 
         credentials = CredentialStore()
-    if catalog is None and service is not None:
-        catalog = getattr(service, "catalog", None)
+    catalog = catalog or getattr(service, "catalog", None)
     if catalog is None:
         from .catalog import ModelCatalog
 
@@ -534,15 +608,31 @@ def create_app(
         service = StudioService(catalog=catalog, credentials=credentials)
     if hasattr(service, "recover"):
         service.recover()
-
-    publisher = MediaPublisher(Path(service.store.studio_root) / "served")
-    controller = StudioController(service, catalog, credentials, publisher)
+    controller = StudioController(
+        service,
+        catalog,
+        credentials,
+        MediaPublisher(Path(service.store.studio_root) / "served"),
+    )
     providers = tuple(catalog.providers())
     provider_value = providers[0] if providers else None
     controls = (
         controller.control_view(provider_value)
         if provider_value
-        else ControlView((), None, False, False, (), None, False)
+        else ControlView(
+            (),
+            None,
+            "temperature",
+            0.7,
+            0.7,
+            False,
+            False,
+            False,
+            False,
+            (),
+            None,
+            False,
+        )
     )
 
     with gr.Blocks(title="Conductor Studio", analytics_enabled=False) as app:
@@ -551,6 +641,8 @@ def create_app(
                 "# Conductor Studio\n### Four ideas. One prompt. Pick the one that moves."
             )
             active_session = gr.State(None)
+            control_mode = gr.State(controls.mode)
+            requested_temperature = gr.State(controls.requested_temperature)
             with gr.Tabs(selected="generate"):
                 with gr.Tab("Generate", id="generate"):
                     with gr.Row():
@@ -590,10 +682,19 @@ def create_app(
                             value=controls.model_value,
                             label="Model",
                         )
+                        temperature = gr.Slider(
+                            0.0,
+                            2.0,
+                            value=controls.temperature_value,
+                            step=0.1,
+                            label="Temperature",
+                            visible=controls.temperature_visible,
+                            interactive=controls.temperature_interactive,
+                        )
                         thinking = gr.Checkbox(
+                            value=controls.thinking_value,
                             visible=controls.thinking_visible,
-                            interactive=controls.thinking_interactive,
-                            label="Thinking mode",
+                            label="Extended thinking",
                         )
                         effort = gr.Dropdown(
                             controls.effort_choices,
@@ -601,12 +702,8 @@ def create_app(
                             visible=controls.effort_visible,
                             label="Reasoning effort",
                         )
-                    generate = gr.Button("Generate four variants", variant="primary")
+                    generate = gr.Button("Generate four variations", variant="primary")
                     notice = gr.Markdown()
-                    with gr.Row(elem_id="variant-grid"):
-                        cards = [
-                            _build_card(gr, slot_id) for slot_id in VariantSlot.SLOT_IDS
-                        ]
                 with gr.Tab("History", id="history"):
                     history_choice = gr.Dropdown(label="Saved sessions", choices=())
                     with gr.Row():
@@ -616,7 +713,6 @@ def create_app(
                 with gr.Tab("Favorites", id="favorites"):
                     favorite_choice = gr.Dropdown(label="Favorite variants", choices=())
                     open_favorite = gr.Button("Open favorite")
-                    gr.Markdown()
                 with gr.Tab("Settings", id="settings"):
                     gr.Markdown(
                         "Credentials stay in process memory and are never written to session manifests."
@@ -638,48 +734,56 @@ def create_app(
                     gr.Markdown(controller.audio_status())
                     ollama_notice = gr.Markdown()
 
-        card_output_components = []
-        for card in cards:
-            card_output_components.extend(
-                card[name]
-                for name in (
-                    "status",
-                    "progress",
-                    "metadata",
-                    "warning",
-                    "image",
-                    "audio",
-                    "midi",
-                    "favorite",
-                    "retry",
-                    "audio_retry",
-                )
-            )
-        app_outputs = [*card_output_components, active_session, notice, generate]
+            # One shared result surface remains visible while navigating among
+            # Generate, History, and Favorites. Reopen events update this same
+            # read-only batch presentation instead of hidden tab-local output.
+            with gr.Row(elem_id="variant-grid"):
+                cards = [_build_card(gr, slot) for slot in VariantSlot.SLOT_IDS]
+            accounting = gr.Markdown("Cost unavailable", elem_classes=["accounting"])
+            batch_error = gr.Markdown(visible=False, elem_classes=["batch-error"])
 
-        def generate_event(
-            prompt_value: str,
-            key_value: str,
-            scale_value: str,
-            provider_value: str,
-            model_value: str,
-            thinking_value: bool,
-            effort_value: str | None,
-        ) -> Iterator[list[Any]]:
-            for view in controller.generate(
-                prompt_value,
-                key_value,
-                scale_value,
-                provider_value,
-                model_value,
-                thinking_value,
-                effort_value,
-            ):
+        card_outputs = [
+            card[name]
+            for card in cards
+            for name in (
+                "status",
+                "progress",
+                "metadata",
+                "warning",
+                "image",
+                "audio",
+                "midi",
+                "favorite",
+                "audio_retry",
+            )
+        ]
+        app_outputs = [
+            *card_outputs,
+            active_session,
+            notice,
+            accounting,
+            batch_error,
+            generate,
+        ]
+
+        def generate_event(*values: Any) -> Iterator[list[Any]]:
+            for view in controller.generate(*values):
                 yield _view_values(view)
 
+        generation_inputs = [
+            prompt,
+            key,
+            scale,
+            provider,
+            model,
+            temperature,
+            requested_temperature,
+            thinking,
+            effort,
+        ]
         generate.click(
             generate_event,
-            [prompt, key, scale, provider, model, thinking, effort],
+            generation_inputs,
             app_outputs,
             concurrency_limit=1,
             concurrency_id="generation",
@@ -688,58 +792,92 @@ def create_app(
         )
         prompt.submit(
             generate_event,
-            [prompt, key, scale, provider, model, thinking, effort],
+            generation_inputs,
             app_outputs,
             concurrency_limit=1,
             concurrency_id="generation",
             api_visibility="private",
         )
-
         for index, slot_id in enumerate(VariantSlot.SLOT_IDS):
             cards[index]["favorite"].click(
-                lambda session_id, slot=slot_id: _view_values(
-                    controller.toggle_favorite(session_id, slot)
+                lambda session, slot=slot_id: _view_values(
+                    controller.toggle_favorite(session, slot)
                 ),
                 active_session,
                 app_outputs,
                 api_visibility="private",
-            )
-            cards[index]["retry"].click(
-                lambda session_id, slot=slot_id: (
-                    _view_values(view) for view in controller.retry(session_id, slot)
-                ),
-                active_session,
-                app_outputs,
-                concurrency_limit=1,
-                concurrency_id="generation",
-                api_visibility="private",
-                show_progress="minimal",
             )
             cards[index]["audio_retry"].click(
-                lambda session_id, slot=slot_id: (
-                    _view_values(view)
-                    for view in controller.retry_audio(session_id, slot)
+                lambda session, slot=slot_id: (
+                    _view_values(view) for view in controller.retry_audio(session, slot)
                 ),
                 active_session,
                 app_outputs,
                 concurrency_limit=1,
                 concurrency_id="generation",
                 api_visibility="private",
-                show_progress="minimal",
+            )
+
+        control_inputs = [
+            provider,
+            model,
+            control_mode,
+            temperature,
+            requested_temperature,
+            thinking,
+            effort,
+        ]
+        control_outputs = [
+            model,
+            temperature,
+            requested_temperature,
+            thinking,
+            effort,
+            control_mode,
+        ]
+
+        def controls_event(
+            selected_provider: str,
+            selected_model: str | None,
+            previous: str,
+            temp: float,
+            requested: float,
+            think: bool,
+            selected_effort: str | None,
+        ) -> tuple[Any, ...]:
+            return _control_values(
+                controller.control_view(
+                    selected_provider,
+                    selected_model,
+                    previous_mode=previous,
+                    temperature=temp,
+                    requested_temperature=requested,
+                    thinking=think,
+                    effort=selected_effort,
+                )
             )
 
         provider.change(
-            lambda selected: _control_values(controller.control_view(selected)),
-            provider,
-            [model, thinking, effort],
-            api_visibility="private",
+            controls_event, control_inputs, control_outputs, api_visibility="private"
         )
         model.change(
-            lambda selected_provider, selected_model: _control_values(
-                controller.control_view(selected_provider, selected_model)
+            controls_event, control_inputs, control_outputs, api_visibility="private"
+        )
+        thinking.change(
+            lambda enabled, requested: (
+                _update(1.0 if enabled else requested, interactive=not enabled),
+                requested,
             ),
-            [provider, model],
-            [model, thinking, effort],
+            [thinking, requested_temperature],
+            [temperature, requested_temperature],
+            api_visibility="private",
+        )
+        temperature.change(
+            lambda value, mode, enabled: (
+                value if mode != "legacy_thinking" or not enabled else gr.skip()
+            ),
+            [temperature, control_mode, thinking],
+            requested_temperature,
             api_visibility="private",
         )
 
@@ -775,7 +913,13 @@ def create_app(
             [history_choice, favorite_choice, history_notice],
             api_visibility="private",
         )
-
+        secret_outputs = [
+            credential_notice,
+            openai_secret,
+            anthropic_secret,
+            google_secret,
+            ollama_host,
+        ]
         save_credentials.click(
             lambda a, b, c, d: (
                 controller.save_credentials(a, b, c, d).status,
@@ -785,13 +929,7 @@ def create_app(
                 _update(""),
             ),
             [openai_secret, anthropic_secret, google_secret, ollama_host],
-            [
-                credential_notice,
-                openai_secret,
-                anthropic_secret,
-                google_secret,
-                ollama_host,
-            ],
+            secret_outputs,
             api_visibility="private",
         )
         clear_credentials.click(
@@ -803,13 +941,7 @@ def create_app(
                 _update(""),
             ),
             None,
-            [
-                credential_notice,
-                openai_secret,
-                anthropic_secret,
-                google_secret,
-                ollama_host,
-            ],
+            secret_outputs,
             api_visibility="private",
         )
         refresh_ollama.click(
@@ -818,19 +950,20 @@ def create_app(
             [provider, model, ollama_notice],
             api_visibility="private",
         )
-
     app.queue(default_concurrency_limit=1)
     return app
 
 
 def _ollama_values(controller: StudioController, host: str) -> tuple[Any, Any, str]:
-    """Adapt one readiness refresh into the model dropdown and its notice."""
     controls, notice = controller.refresh_ollama(host)
-    provider_update = _update(
-        choices=list(controller.catalog.providers()),
-        value="Ollama" if controls.model_choices else None,
+    return (
+        _update(
+            choices=list(controller.catalog.providers()),
+            value="Ollama" if controls.model_choices else None,
+        ),
+        _control_values(controls)[0],
+        notice,
     )
-    return provider_update, _control_values(controls)[0], notice
 
 
 __all__ = [
