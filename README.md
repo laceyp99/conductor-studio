@@ -1,15 +1,13 @@
 # Conductor Studio
 
 Conductor Studio is a local-first Gradio application for comparing four musical
-loop variants generated through Conductor Core. One session owns an immutable
-prompt, key, scale, provider, model, and reasoning selection. The four cards
-share those settings while using the fixed Studio temperature ladder `0.2`,
-`0.3`, `0.4`, and `0.5` whenever the selected Core adapter can make that value
-effective.
+loop variations. One Generate click creates a new Studio session and makes one
+Conductor Core batch request for four ordered items. The prompt, musical
+settings, provider, model, and generation controls are immutable for that
+session; generate again to start a separate request.
 
-The filesystem under `~/.conductor/studio/` is the source of truth. Studio is a
-personal, single-process tool: it has no accounts, authentication, billing,
-public sharing, or hosted multi-user mode.
+Studio is a personal, single-process tool. It has no accounts, authentication,
+billing, public sharing, or hosted multi-user mode.
 
 ## Prerequisites
 
@@ -17,40 +15,31 @@ public sharing, or hosted multi-user mode.
 - [uv](https://docs.astral.sh/uv/) 0.12.6 or newer.
 - FluidSynth and FFmpeg on `PATH` for optional MP3 previews. MIDI generation
   and downloads do not require the audio toolchain.
-- Provider credentials only for the providers you intend to use. Ollama also
-  requires a reachable local Ollama service.
+- Credentials for the providers you use. Ollama also needs a reachable service.
 
 ## Install and run
-
-Run these commands from the Studio repository root. No shell activation is
-needed; uv creates and uses `.venv` automatically.
 
 ```powershell
 uv sync --all-groups
 uv run conductor-studio
 ```
 
-The default server binds to `127.0.0.1` and Gradio sharing is always disabled.
-To deliberately bind to another interface, opt in explicitly:
+The server binds to `127.0.0.1` and Gradio sharing is disabled. Network binding
+is an explicit, unauthenticated opt-in:
 
 ```powershell
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-This prints a prominent no-authentication warning. Do not expose Studio to the
-public internet or treat `--allow-network` as an access-control feature.
-
-Studio installs Core from the pinned remote revision below; it never imports a
-sibling checkout:
+Studio installs Conductor Core v0.5.3 from the immutable peeled commit below,
+never from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-068b85d7471602a2cf18476d5207c466f088bf41
+bc60d017b8a561cb77d7858960e60b9584dfacf7
 ```
 
-## Credentials and provider readiness
-
-Core's documented environment variables are:
+## Credentials and controls
 
 | Provider | Environment variable |
 |---|---|
@@ -59,50 +48,41 @@ Core's documented environment variables are:
 | Google Gemini | `GEMINI_API_KEY` |
 | Ollama host | `OLLAMA_API_HOST_ADDRESS` |
 
-The Settings workflow accepts temporary values in process memory. A session
-override takes precedence over its environment value; clearing the override
-restores environment fallback. Values are never written to manifests, logs, or
-the filesystem, and the UI reports only a source/configured status. Restarting
-the process clears overrides.
+Settings can hold temporary overrides in process memory. Overrides take
+precedence over the environment and disappear at restart; credentials and raw
+provider messages are never persisted.
 
-Cloud readiness means that a credential is configured; Studio does not make a
-billable validation request just to turn a status green. Ollama discovery is a
-non-billable status request with a short timeout and an explicit refresh. Its
-model names are live and are not part of Core's packaged cloud catalog.
+Provider and model controls come from Core metadata. Depending on the selected
+model, Studio shows either temperature, a discrete reasoning-effort choice, or
+temperature with an extended-thinking toggle. The default requested temperature
+is `0.7` over Core's `0.0`–`2.0` range. Extended thinking may make the effective
+temperature `1.0`. The pinned Core contract has no seed field, so Studio neither
+offers nor emulates one.
 
-Provider and model are separate controls. The catalog is derived from Core's
-validated metadata. Thinking and effort controls appear only when the selected
-model exposes those capabilities. Temperature behavior is provider/model
-dependent, and the current pinned Core revision has no seed request field or
-seed capability metadata: Studio must record seed support as unavailable and
-must not emulate a seed by changing the prompt.
+## Batch workflow and accounting
 
-## MVP workflow
+1. Enter a prompt, key, scale, provider, model, and the controls offered for
+   that model.
+2. Submit once. Studio first persists the complete queued manifest, then sends
+   one request for four variations.
+3. All four cards share provider progress. Ordered MIDI processing may be shown,
+   but no result reference or download is published until all four items pass
+   validation and are saved atomically.
+4. Cost and available input, output, and total token counts are recorded once
+   for the batch and displayed beneath its cards.
+5. A provider, validation, or persistence error fails the entire batch with one
+   sanitized error. Start a new session to try generation again; Studio never
+   repeats the provider request within an existing session.
+6. Reopen completed work from History or Favorites without provider activity.
 
-1. Open the Generate tab and enter a nonblank prompt, key, scale, provider,
-   model, and applicable reasoning settings.
-2. Submit once. Studio creates a new session and persists its immutable
-   settings plus four queued slots before any provider call.
-3. Watch the fixed four-card grid update independently through provider, MIDI,
-   and audio stages. A successful MIDI remains available if audio cannot
-   render.
-4. Download MIDI/audio artifacts, favorite variants, or retry only failed or
-   interrupted slots. Successful siblings are not regenerated.
-5. Reopen completed work from History or Favorites without contacting a
-   provider. Delete moves a complete terminal session to managed Trash rather
-   than permanently removing it.
+After successful MIDI publication, Studio derives loop JSON and piano-roll
+images and may render up to four MP3 previews. Those jobs are optional: a roll
+or audio failure never invalidates MIDI. Audio-only retry uses the existing
+contained MIDI and never makes an LLM request.
 
-## Audio behavior
+## Data, recovery, and Trash
 
-Setups with FluidSynth, FFmpeg, and Core's packaged SoundFont can render an MP3
-preview. Missing tools, SoundFont discovery failures, and render errors are
-non-fatal: Studio preserves the generated MIDI, reports an actionable audio
-status, and allows an audio-only retry where supported. Audio retry must never
-make another LLM request.
-
-## Data, recovery, and backups
-
-By default, Studio uses:
+The filesystem under `~/.conductor/studio/` is authoritative:
 
 ```text
 ~/.conductor/studio/
@@ -110,41 +90,42 @@ By default, Studio uses:
     YYYYMMDD-HHMMSS_shortuuid/
       session.json
       session.previous.json
+      core/
+        generations/          # Core child records and MIDI
+        variations/           # Core batch records
       variants/01/ ... variants/04/
-        core/                 # Core artifacts, including loop.mid/messages/metadata
+        loop.json
         piano-roll.png
-  served/                     # only directory allowed for Gradio file serving
-  trash/                      # recoverable deleted session folders
+        preview.mp3
+  served/                     # copied, approved media only
+  trash/                      # complete recoverable session folders
 ```
 
-Set `CONDUCTOR_HOME` to move the suite root. Studio does not honor Core's
-`CONDUCTOR_CORE_DATA_DIR` for its own manifests. Each manifest is versioned,
-validated, and replaced atomically; the prior valid manifest is retained as
-`session.previous.json`. Completed slot results are persisted immediately.
+`CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
+serialized, and atomically replaced; the preceding valid manifest is retained
+as `session.previous.json`.
 
-On startup, queued or active slots are marked `interrupted`; Studio never
-automatically retries an uncertain provider call. Retry them manually after
-checking credentials and provider readiness. If a manifest becomes unreadable,
-keep the session directory intact and inspect the previous manifest. Trash is
-under the managed root and can be manually restored by moving a complete
-session directory back beneath `sessions/`; do not copy only individual files.
-Back up the complete `sessions/` and `trash/` directories while Studio is
-stopped or between writes.
+At startup, a nonterminal batch is marked interrupted with a sanitized failure,
+including any in-progress automatic audio. Studio does not inspect Core history,
+reconstruct results, or automatically retry. A rare crash after Core completes
+but before Studio publishes the batch can therefore leave unreferenced Core
+records under that session; a later new session may incur another provider
+charge.
+
+Deleting a terminal session moves its whole directory to managed Trash in one
+operation. Its manifests, backups, `core/generations`, `core/variations`, and
+derived variants stay together. Restore by moving the complete directory back;
+do not copy individual Core files.
 
 ## Security boundary
 
-The default localhost bind is intentional. Studio has no authentication and
-can issue provider requests using a user's credentials, so LAN binding is an
-explicit opt-in with a warning. Gradio `share` remains disabled; public links,
-reverse-proxy deployment, and public hosting are unsupported.
-
-Only the dedicated `served/` directory is allowed for Gradio file serving;
-session and trash roots are blocked. Do not place credentials, arbitrary local
-files, or generated secrets in served content.
+Only regular, contained media is copied into `served/`: Core generation MIDI
+(`.mid`/`.midi`) and Studio-derived audio or images (`.mp3`/`.png`). Session
+manifests, Core metadata, variation records, provider messages, loop JSON, and
+anything beneath Trash are never served directly. Do not expose the
+unauthenticated network mode to the public internet.
 
 ## Developer checks
-
-Use the locked environment and run from the repository root:
 
 ```powershell
 uv sync --all-groups
@@ -154,46 +135,31 @@ uv run --locked pytest -q
 uv build
 ```
 
-Tests are deterministic and should not make live provider calls. Keep Core
-behind `conductor_studio.core_adapter`; do not import provider SDKs directly
-from Studio. Leave `plan.md` and review/scratch markdown uncommitted.
+Tests are offline and deterministic. Keep Core behind
+`conductor_studio.core_adapter`; Studio must not import provider SDKs directly.
+Leave `plan.md`, `decisions.md`, and review/scratch notes uncommitted.
 
-## Manual verification checklist
+## Manual verification
 
-The following checks require a local environment and are intentionally not
-claimed by the automated suite until run on that environment:
+- Launch on localhost and verify all three capability-driven control modes.
+- Generate once and confirm shared request progress, ordered MIDI processing,
+  atomic four-download publication, and batch accounting.
+- Force a batch failure and verify all cards fail together with one sanitized
+  error; Generate should create a new session.
+- Remove FluidSynth or FFmpeg and verify MIDI remains usable, then retry audio
+  without provider activity.
+- Terminate during generation, restart, and verify interruption without Core
+  reconstruction or retry.
+- Reopen History/Favorites, move a terminal session to Trash, and confirm the
+  complete Core and variant trees moved while `served/` contains media only.
 
-- [ ] Launch offline on `127.0.0.1`; confirm the app loads without credentials.
-- [ ] Configure one environment credential and verify source status without
-      revealing its value.
-- [ ] Set, clear, and restart a session override; verify environment fallback
-      and process-memory lifetime.
-- [ ] Refresh Ollama against both a reachable and unreachable host.
-- [ ] Generate four variants and confirm stable progressive four-card layout.
-- [ ] Force one slot failure; verify three successes remain and only the failed
-      slot is retried.
-- [ ] Remove FluidSynth or FFmpeg; verify MIDI remains usable and audio status
-      is actionable; restore the tool and retry audio only.
-- [ ] Terminate during generation; restart and verify active slots are
-      interrupted rather than automatically retried.
-- [ ] Reopen History/Favorites without network activity.
-- [ ] Favorite variants, move a terminal session to Trash, and manually
-      restore its complete folder.
-- [ ] Verify desktop 2x2 and narrow one-column layouts in a current browser.
-- [ ] Launch with `--allow-network` and verify the no-auth warning while
-      `share=False` remains in effect.
-- [ ] When explicitly configured, run one provider smoke test for OpenAI,
-      Anthropic, Gemini, and Ollama; record failures rather than treating them
-      as validated.
+Live OpenAI, Anthropic, Gemini, and Ollama checks are opt-in because they require
+credentials and can incur cost. When not explicitly run, their status is
+unverified rather than passed or failed.
 
 ## MVP limitations
 
-Studio intentionally does not provide prompt refinement/branching, variable
-variant counts, manual temperature or seed controls, automatic retries, true
-cancellation, synchronized playback cursors, in-app MIDI editing, user
-SoundFont management, search/tags/import/export, permanent deletion, accounts,
-authentication, public sessions, billing, or hosted multi-user isolation.
-
-Seed reproducibility is unavailable with the pinned Core contract. Temperature
-variation is a requested Studio policy and may not be effective for reasoning
-or provider models whose adapters omit or override it.
+Studio intentionally omits variable batch sizes, provider-generation retry,
+automatic recovery, cancellation, in-app MIDI editing, user SoundFont
+management, search/tags/import/export, permanent deletion, accounts,
+authentication, public sessions, billing, and hosted multi-user isolation.

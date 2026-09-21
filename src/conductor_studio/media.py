@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .models import ArtifactRefs, SessionManifest, VariantSlot
 from .storage import ContainmentError, SessionStore
@@ -64,6 +64,16 @@ class MediaPublisher:
         """Validate and copy one manifest-relative artifact, or return ``None``."""
         if not relative_path:
             return None
+        parsed = PurePosixPath(relative_path)
+        suffix = parsed.suffix.lower()
+        if suffix in {".mid", ".midi"}:
+            if len(parsed.parts) < 4 or parsed.parts[:2] != (
+                "core",
+                "generations",
+            ):
+                raise ContainmentError("MIDI must be a Core generation artifact")
+        elif not parsed.parts or parsed.parts[0] != "variants":
+            raise ContainmentError("derived media must be stored beneath variants")
         source = store.artifact_path(session_id, relative_path)
         destination = self._destination(session_id, slot_id, source)
         # Copy to a sibling temporary file and replace so Gradio never sees a

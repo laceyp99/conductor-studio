@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest
@@ -9,37 +7,65 @@ from conductor_studio.models import SessionManifest, SessionSettings
 from conductor_studio.storage import ContainmentError, SessionStore
 
 
-def test_publisher_copies_only_contained_media_and_not_session_manifest(tmp_path: Path):
+def setup_media(tmp_path: Path):
     store = SessionStore(tmp_path / "studio")
     manifest = SessionManifest.create(
         SessionSettings(prompt="A motif", provider="OpenAI", model="test-model"),
+        core_version="0.5.3",
         session_id="20260101-010101_abcd1234",
-        seeds=[1, 2, 3, 4],
     )
     store.create(manifest)
-    session_dir = store._session_dir(manifest.session_id, must_exist=True)
-    source = session_dir / "variants" / "01" / "piano-roll.png"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(b"png")
-    manifest.slot("01").artifacts.piano_roll = "variants/01/piano-roll.png"
-    store.save(manifest)
+    return store, manifest, MediaPublisher(store.studio_root / "served")
 
-    publisher = MediaPublisher(store.studio_root / "served")
-    published = publisher.publish_path(
-        store, manifest.session_id, "01", manifest.slot("01").artifacts.piano_roll
-    )
 
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    [
+        ("core/generations/generation-1/loop.mid", b"midi"),
+        ("variants/01/preview.mp3", b"audio"),
+        ("variants/01/piano-roll.png", b"image"),
+    ],
+)
+def test_publisher_copies_only_approved_contained_media(
+    tmp_path: Path, relative: str, content: bytes
+):
+    store, manifest, publisher = setup_media(tmp_path)
+    source = store.session_dir(manifest.session_id) / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(content)
+    published = publisher.publish_path(store, manifest.session_id, "01", relative)
     assert published is not None
-    assert published.read_bytes() == b"png"
+    assert published.read_bytes() == content
     assert published.is_relative_to(publisher.served_root)
-    assert not (publisher.served_root / "session.json").exists()
 
 
-def test_publisher_rejects_traversal_and_unapproved_suffix(tmp_path: Path):
-    store = SessionStore(tmp_path / "studio")
-    publisher = MediaPublisher(store.studio_root / "served")
-
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "../session.json",
+        "session.json",
+        "session.mid",
+        "core/variations/batch-1/variation.json",
+        "core/variations/batch-1/messages.mid",
+        "core/generations/generation-1/metadata.json",
+        "variants/01/loop.json",
+    ],
+)
+def test_publisher_rejects_manifests_metadata_messages_and_unsafe_paths(
+    tmp_path: Path, relative: str
+):
+    store, manifest, publisher = setup_media(tmp_path)
     with pytest.raises(ContainmentError):
-        publisher.publish_path(
-            store, "20260101-010101_abcd1234", "01", "../session.json"
-        )
+        publisher.publish_path(store, manifest.session_id, "01", relative)
+    assert not any(publisher.served_root.rglob("*.*"))
+
+
+def test_publish_slot_does_not_expose_invalid_core_metadata(tmp_path: Path):
+    store, manifest, publisher = setup_media(tmp_path)
+    slot = manifest.slot("01")
+    slot.artifacts.midi = "core/variations/batch-1/messages.mid"
+    assert publisher.publish_slot(store, manifest, slot) == {
+        "piano_roll": None,
+        "audio": None,
+        "midi": None,
+    }

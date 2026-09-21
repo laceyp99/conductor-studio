@@ -18,8 +18,9 @@ from pathlib import Path, PurePosixPath
 
 from .config import resolve_studio_root
 from .models import (
-    TERMINAL_SLOT_STATES,
     AudioState,
+    ErrorCategory,
+    FailureInfo,
     SessionManifest,
     SlotState,
 )
@@ -121,6 +122,17 @@ class SessionStore:
         if candidate.parent != root:
             raise ContainmentError("session must be a direct child of its root")
         return self._contained(candidate, root, must_exist=must_exist)
+
+    def session_dir(
+        self, session_id: str, *, in_trash: bool = False, must_exist: bool = False
+    ) -> Path:
+        """Return a safely contained session directory.
+
+        This is the supported boundary for code that needs to create derived
+        artifacts beneath a session; callers must still validate individual
+        files with :meth:`artifact_path` before publishing them.
+        """
+        return self._session_dir(session_id, in_trash=in_trash, must_exist=must_exist)
 
     @staticmethod
     def _read_manifest(path: Path, expected_id: str) -> SessionManifest:
@@ -273,27 +285,33 @@ class SessionStore:
             return self.save(manifest)
 
     def recover_startup(self) -> list[SessionManifest]:
-        """Mark every persisted nonterminal slot interrupted, without calls."""
+        """Atomically interrupt every nonterminal batch, without Core recovery."""
         recovered: list[SessionManifest] = []
         for manifest in list(self.iter_history()):
-            if manifest.terminal:
+            batch_active = not manifest.terminal
+            audio_active = any(
+                slot.audio.state is AudioState.RENDERING for slot in manifest.slots
+            )
+            if not batch_active and not audio_active:
                 continue
             lock = self._lock_for(manifest.session_id)
             with lock:
                 current = self.load(manifest.session_id)
-                changed = False
                 for slot in current.slots:
-                    if slot.state in TERMINAL_SLOT_STATES:
-                        continue
-                    slot.transition(SlotState.INTERRUPTED)
-                    if (
-                        slot.midi.value == "ready"
-                        and slot.audio.state.value == "rendering"
-                    ):
+                    if batch_active:
+                        slot.state = SlotState.INTERRUPTED
+                    if slot.audio.state is AudioState.RENDERING:
                         slot.audio.state = AudioState.INTERRUPTED
-                    changed = True
-                if changed:
-                    recovered.append(self.save(current))
+                if batch_active:
+                    current.batch.failure = FailureInfo(
+                        category=ErrorCategory.INTERRUPTED,
+                        message=(
+                            "Generation was interrupted when Studio stopped. "
+                            "Start a new session to generate again."
+                        ),
+                    )
+                current.refresh_status()
+                recovered.append(self.save(current))
         return recovered
 
     def artifact_path(
@@ -307,6 +325,14 @@ class SessionStore:
             part in {"", ".", ".."} for part in parsed.parts
         ):
             raise ContainmentError("artifact path contains traversal")
+        if parsed.parts[0] == "core" and (
+            len(parsed.parts) < 4
+            or parsed.parts[:2] != ("core", "generations")
+            or parsed.suffix.lower() not in {".mid", ".midi"}
+        ):
+            raise ContainmentError(
+                "only Core generation MIDI artifacts may be referenced"
+            )
         session_dir = self._session_dir(session_id, in_trash=in_trash, must_exist=True)
         candidate = session_dir.joinpath(*parsed.parts)
         result = self._contained(candidate, session_dir, must_exist=True)
