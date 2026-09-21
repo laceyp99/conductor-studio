@@ -27,6 +27,12 @@ dev = [
 [tool.uv]
 required-version = ">=0.12.6"
 
+[tool.hatch.build]
+exclude = [
+    "/decisions.md",
+    "/plan.md",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/conductor_studio"]
 

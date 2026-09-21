@@ -199,7 +199,7 @@ class StudioService:
         warning = None
         try:
             root = (
-                self.store._session_dir(session_id, must_exist=True)
+                self.store.session_dir(session_id, must_exist=True)
                 / "variants"
                 / slot_id
             )
@@ -327,7 +327,7 @@ class StudioService:
                 self.subscribe(created.session_id, on_event)
             self._events.setdefault(created.session_id, Queue())
             credentials = self.credentials.provider_credentials()
-            root = self.store._session_dir(created.session_id, must_exist=True)
+            root = self.store.session_dir(created.session_id, must_exist=True)
             adapter = self.adapter_factory(root, credentials)
             executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="studio-batch"
@@ -358,7 +358,7 @@ class StudioService:
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
             adapter = self.adapter_factory(
-                self.store._session_dir(session_id, must_exist=True),
+                self.store.session_dir(session_id, must_exist=True),
                 self.credentials.provider_credentials(),
             )
             executor = ThreadPoolExecutor(
