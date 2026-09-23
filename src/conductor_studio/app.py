@@ -468,7 +468,12 @@ class StudioController:
         )
 
     def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
-        readiness = self.catalog.refresh_ollama(host or None)
+        # Discover models on the same host generation will use: a typed host
+        # becomes the in-memory override, otherwise the saved override or
+        # environment value applies.
+        if host and host.strip():
+            self.credentials.set_override("ollama", host)
+        readiness = self.catalog.refresh_ollama(self.credentials.resolve("ollama"))
         view = self.control_view("Ollama")
         return view, (
             f"Ollama ready · {len(readiness.models)} model(s) discovered."
@@ -947,14 +952,16 @@ def create_app(
         refresh_ollama.click(
             lambda host: _ollama_values(controller, host),
             ollama_host,
-            [provider, model, ollama_notice],
+            [provider, model, ollama_notice, credential_notice],
             api_visibility="private",
         )
     app.queue(default_concurrency_limit=1)
     return app
 
 
-def _ollama_values(controller: StudioController, host: str) -> tuple[Any, Any, str]:
+def _ollama_values(
+    controller: StudioController, host: str
+) -> tuple[Any, Any, str, str]:
     controls, notice = controller.refresh_ollama(host)
     return (
         _update(
@@ -963,6 +970,7 @@ def _ollama_values(controller: StudioController, host: str) -> tuple[Any, Any, s
         ),
         _control_values(controls)[0],
         notice,
+        controller.credentials_view().status,
     )
 
 

@@ -167,6 +167,35 @@ class _ControlCatalog:
         return self.items[model]
 
 
+class _OllamaCatalog(_Catalog):
+    def __init__(self):
+        self.hosts = []
+
+    def refresh_ollama(self, host):
+        self.hosts.append(host)
+        return SimpleNamespace(available=False, models=(), error=None)
+
+
+def test_ollama_refresh_discovers_on_the_generation_host():
+    catalog = _OllamaCatalog()
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://env-host:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials, object())
+
+    controller.refresh_ollama("")
+    credentials.set_override("ollama", "http://saved-host:11434")
+    controller.refresh_ollama("  ")
+    controller.refresh_ollama(" http://typed-host:11434 ")
+
+    assert catalog.hosts == [
+        "http://env-host:11434",
+        "http://saved-host:11434",
+        "http://typed-host:11434",
+    ]
+    assert credentials.provider_credentials().ollama_host == "http://typed-host:11434"
+
+
 def test_control_transitions_preserve_only_supported_values():
     controller = StudioController(object(), _ControlCatalog(), object(), object())
     direct = controller.control_view(
