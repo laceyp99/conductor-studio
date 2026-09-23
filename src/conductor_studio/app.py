@@ -369,12 +369,22 @@ class StudioController:
         return _library_view(self.service)
 
     def credentials_view(self) -> CredentialView:
-        return CredentialView(
-            ", ".join(
-                f"{s.provider.title()}: {s.label()}"
-                for s in self.credentials.statuses().values()
-            )
-        )
+        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
+
+        parts = []
+        for s in self.credentials.statuses().values():
+            label = f"{s.provider.title()}: {s.label()}"
+            if s.provider == "ollama":
+                # Hosts are not secrets; show the effective origin so users can
+                # see what an override replaced.  Userinfo is never displayed.
+                host = self.credentials.resolve("ollama")
+                label += (
+                    f" ({_safe_host_label(host)})"
+                    if host
+                    else f" (default {DEFAULT_OLLAMA_HOST})"
+                )
+            parts.append(label)
+        return CredentialView(", ".join(parts))
 
     @staticmethod
     def audio_status() -> str:
@@ -392,7 +402,9 @@ class StudioController:
             ("google", google),
             ("ollama", ollama),
         ):
-            self.credentials.set_override(provider, value)
+            # Blank fields keep the current value; use Clear to remove overrides.
+            if value and value.strip():
+                self.credentials.set_override(provider, value)
         return self.credentials_view()
 
     def clear_credentials(self) -> CredentialView:
@@ -931,7 +943,7 @@ def create_app(
                 _update(""),
                 _update(""),
                 _update(""),
-                _update(""),
+                _update(d.strip() if d else ""),
             ),
             [openai_secret, anthropic_secret, google_secret, ollama_host],
             secret_outputs,
@@ -949,10 +961,19 @@ def create_app(
             secret_outputs,
             api_visibility="private",
         )
+        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
         refresh_ollama.click(
-            lambda host: _ollama_values(controller, host),
-            ollama_host,
-            [provider, model, ollama_notice, credential_notice],
+            lambda host, current: _ollama_values(controller, host, current, True),
+            [ollama_host, provider],
+            ollama_outputs,
+            api_visibility="private",
+        )
+        # Discovery is a local, non-billable status check; run it on page load
+        # so Ollama appears without a manual refresh.  Never switch providers.
+        app.load(
+            lambda current: _ollama_values(controller, "", current, False),
+            provider,
+            ollama_outputs,
             api_visibility="private",
         )
     app.queue(default_concurrency_limit=1)
@@ -960,18 +981,35 @@ def create_app(
 
 
 def _ollama_values(
-    controller: StudioController, host: str
-) -> tuple[Any, Any, str, str]:
-    controls, notice = controller.refresh_ollama(host)
+    controller: StudioController, host: str, current: str | None, select: bool
+) -> tuple[Any, ...]:
+    """Update the provider list and, when it changes, every dependent control.
+
+    Returning the complete control set in one event avoids chained provider and
+    model change events validating a stale effort value against new choices.
+    """
+    ollama, notice = controller.refresh_ollama(host)
+    providers = tuple(controller.catalog.providers())
+    if select and ollama.model_choices:
+        selected, controls = "Ollama", ollama
+    elif current in providers:
+        selected, controls = current, None
+    else:
+        selected = providers[0] if providers else None
+        controls = controller.control_view(selected) if selected else None
+    control_values = _control_values(controls) if controls else (_skip(),) * 6
     return (
-        _update(
-            choices=list(controller.catalog.providers()),
-            value="Ollama" if controls.model_choices else None,
-        ),
-        _control_values(controls)[0],
+        _update(choices=list(providers), value=selected),
+        *control_values,
         notice,
         controller.credentials_view().status,
     )
+
+
+def _skip() -> Any:
+    import gradio as gr
+
+    return gr.skip()
 
 
 __all__ = [

@@ -13,6 +13,7 @@ from conductor_core import music
 CORE_CLOUD_PROVIDERS = ("OpenAI", "Google", "Anthropic")
 OLLAMA_PROVIDER = "Ollama"
 DEFAULT_OLLAMA_TIMEOUT = 2.0
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
 class CatalogError(ValueError):
@@ -238,7 +239,7 @@ class ModelCatalog:
         self.ollama_timeout = float(ollama_timeout)
         self._cloud: dict[str, tuple[ModelCapability, ...]] = {}
         self._ollama: tuple[ModelCapability, ...] = ()
-        self._ollama_status = OllamaReadiness(False, (), "http://localhost:11434")
+        self._ollama_status = OllamaReadiness(False, (), DEFAULT_OLLAMA_HOST)
         self.refresh()
 
     def refresh(self) -> tuple[ModelCapability, ...]:
@@ -307,7 +308,7 @@ class ModelCatalog:
     capability = lookup
 
     def refresh_ollama(self, host: str | None = None) -> OllamaReadiness:
-        selected_host = host or "http://localhost:11434"
+        selected_host = host or DEFAULT_OLLAMA_HOST
         try:
             raw_status = _invoke_loader(
                 self._ollama_status_loader, selected_host, self.ollama_timeout
@@ -371,6 +372,7 @@ class ModelCatalog:
 
 __all__ = [
     "CORE_CLOUD_PROVIDERS",
+    "DEFAULT_OLLAMA_HOST",
     "DEFAULT_OLLAMA_TIMEOUT",
     "OLLAMA_PROVIDER",
     "CatalogError",
