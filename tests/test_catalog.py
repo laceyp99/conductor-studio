@@ -56,8 +56,8 @@ def test_legacy_mode_is_capability_shaped_without_provider_branching() -> None:
 def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
     calls = []
 
-    def loader(*, force_refresh, host_address, request_timeout):
-        calls.append((force_refresh, host_address, request_timeout))
+    def loader(*, host_address, request_timeout):
+        calls.append((host_address, request_timeout))
         return {
             "available": True,
             "models": ["llama3", "llama3"],
@@ -71,7 +71,7 @@ def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
         ollama_timeout=1.25,
     )
     status = catalog.refresh_ollama("http://ollama")
-    assert calls == [(True, "http://ollama", 1.25)]
+    assert calls == [("http://ollama", 1.25)]
     assert status.available is True
     assert status.models == ("llama3",)
     assert catalog.providers()[-1] == "Ollama"

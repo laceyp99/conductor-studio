@@ -99,6 +99,15 @@ def test_core_variation_contract_is_available() -> None:
     assert method_signature.return_annotation is conductor_core.VariationBatchResult
 
 
+def test_core_ollama_status_contract_matches_studio_loader() -> None:
+    from conductor_core.providers.ollama import get_ollama_status
+
+    assert list(signature(get_ollama_status).parameters) == [
+        "host_address",
+        "request_timeout",
+    ]
+
+
 def test_core_metadata_and_offline_resources_load() -> None:
     model_info = music.get_model_info()
     assert isinstance(model_info.get("models"), dict)

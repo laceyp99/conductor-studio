@@ -180,12 +180,12 @@ def _invoke_loader(loader: Callable[..., Any], host: str, timeout: float) -> Any
     except (TypeError, ValueError):
         accepts_kwargs = True
         parameters = {}
-    # The real Core loader accepts the canonical names below.  Aliases are
+    # These are exactly the parameters of the pinned Core
+    # ``get_ollama_status``; a contract test guards the match.  Aliases are
     # useful only for narrow injected test/application loaders with an
     # explicit signature; never send them to a ``**kwargs`` loader because it
     # may forward unknown names to Core.
     candidates = {
-        "force_refresh": True,
         "host_address": host,
         "request_timeout": timeout,
     }
