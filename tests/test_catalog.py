@@ -81,6 +81,60 @@ def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
     assert model.rpm is None
 
 
+def test_ollama_controls_follow_core_model_capabilities() -> None:
+    def loader(**_):
+        return {
+            "available": True,
+            "models": ["plain", "toggle", "levels", "uninspected"],
+            "model_capabilities": {
+                "plain": {"extended_thinking": False, "effort_options": []},
+                "toggle": {"extended_thinking": True, "effort_options": []},
+                "levels": {
+                    "extended_thinking": True,
+                    "effort_options": ["low", "medium", "high"],
+                    "temperature_supported": True,
+                },
+            },
+            "host": "http://ollama",
+            "error": None,
+        }
+
+    catalog = ModelCatalog(model_info_loader=_info, ollama_status_loader=loader)
+    catalog.refresh_ollama()
+
+    assert catalog.lookup("Ollama", "plain").control_mode == "temperature"
+    toggle = catalog.lookup("Ollama", "toggle")
+    assert toggle.control_mode == "legacy_thinking"
+    assert toggle.effort_options == ()
+    levels = catalog.lookup("Ollama", "levels")
+    assert levels.control_mode == "effort"
+    assert levels.effort_options == ("low", "medium", "high")
+    assert catalog.lookup("Ollama", "uninspected").control_mode == "temperature"
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        [],
+        {"m": "thinking"},
+        {"m": {"extended_thinking": "yes"}},
+        {"m": {"extended_thinking": False, "effort_options": ["low"]}},
+    ],
+)
+def test_malformed_ollama_capabilities_fail_closed(capabilities) -> None:
+    catalog = ModelCatalog(
+        model_info_loader=_info,
+        ollama_status_loader=lambda **_: {
+            "available": True,
+            "models": ["m"],
+            "model_capabilities": capabilities,
+            "error": None,
+        },
+    )
+    with pytest.raises(CatalogError):
+        catalog.refresh_ollama()
+
+
 def test_unreachable_ollama_is_nonfatal_and_has_no_models() -> None:
     catalog = ModelCatalog(
         model_info_loader=_info,

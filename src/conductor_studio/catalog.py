@@ -163,6 +163,40 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
     )
 
 
+def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
+    """Map Core's per-model Ollama capabilities onto Studio controls.
+
+    A model without Core capability data (inspection failed, or an older
+    loader) stays temperature-only rather than guessing thinking support.
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise CatalogError(f"Ollama/{model} capabilities must be an object")
+    thinking = _bool(raw, "extended_thinking")
+    efforts = _efforts(raw)
+    if efforts and not thinking:
+        raise CatalogError(f"Ollama/{model} effort_options require extended_thinking")
+    temp_supported = _bool(raw, "temperature_supported", True)
+    return ModelCapability(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        display_name=model,
+        thinking_supported=thinking,
+        effort_options=efforts,
+        min_thinking_budget=None,
+        max_thinking_budget=None,
+        always_on_adaptive_thinking=False,
+        temperature_supported=temp_supported,
+        control_mode=_control_mode(
+            thinking_supported=thinking,
+            efforts=efforts,
+            temperature_supported=temp_supported,
+        ),
+        rpm=None,
+    )
+
+
 def _default_ollama_loader(**kwargs: Any) -> Mapping[str, Any]:
     from conductor_core.providers.ollama import get_ollama_status
 
@@ -338,6 +372,11 @@ class ModelCatalog:
                 raise CatalogError("Ollama model IDs must be nonblank strings")
             if model not in model_ids:
                 model_ids.append(model)
+        raw_capabilities = raw_status.get("model_capabilities")
+        if raw_capabilities is None:
+            raw_capabilities = {}
+        if not isinstance(raw_capabilities, Mapping):
+            raise CatalogError("Ollama model_capabilities must be an object")
         error = raw_status.get("error")
         if error is not None and not isinstance(error, str):
             raise CatalogError("Ollama status error must be a string or null")
@@ -348,20 +387,7 @@ class ModelCatalog:
             error="Ollama is unavailable at the configured host." if error else None,
         )
         self._ollama = tuple(
-            ModelCapability(
-                provider=OLLAMA_PROVIDER,
-                model=model,
-                display_name=model,
-                thinking_supported=False,
-                effort_options=(),
-                min_thinking_budget=None,
-                max_thinking_budget=None,
-                always_on_adaptive_thinking=False,
-                temperature_supported=True,
-                control_mode="temperature",
-                rpm=None,
-                available=True,
-            )
+            _normalize_ollama_model(model, raw_capabilities.get(model))
             for model in self._ollama_status.models
         )
         return self._ollama_status
