@@ -178,6 +178,16 @@ def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
     if efforts and not thinking:
         raise CatalogError(f"Ollama/{model} effort_options require extended_thinking")
     temp_supported = _bool(raw, "temperature_supported", True)
+    mode = _control_mode(
+        thinking_supported=thinking,
+        efforts=efforts,
+        temperature_supported=temp_supported,
+    )
+    # Ollama-specific: Core sends the requested temperature with ``think``, so
+    # the thinking toggle must not lock temperature the way legacy cloud
+    # thinking does.
+    if mode == "legacy_thinking":
+        mode = "thinking_toggle"
     return ModelCapability(
         provider=OLLAMA_PROVIDER,
         model=model,
@@ -188,11 +198,7 @@ def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
         max_thinking_budget=None,
         always_on_adaptive_thinking=False,
         temperature_supported=temp_supported,
-        control_mode=_control_mode(
-            thinking_supported=thinking,
-            efforts=efforts,
-            temperature_supported=temp_supported,
-        ),
+        control_mode=mode,
         rpm=None,
     )
 

@@ -159,6 +159,9 @@ class _ControlCatalog:
             "legacy": SimpleNamespace(
                 model="legacy", control_mode="legacy_thinking", effort_options=()
             ),
+            "toggle": SimpleNamespace(
+                model="toggle", control_mode="thinking_toggle", effort_options=()
+            ),
         }
 
     def models(self, provider):
@@ -300,6 +303,29 @@ def test_control_transitions_preserve_only_supported_values():
     assert returned.temperature_value == 0.7
     assert legacy.temperature_value == 1.4
     assert legacy.thinking_value is False
+
+
+def test_ollama_thinking_toggle_keeps_temperature_user_controlled():
+    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    view = controller.control_view(
+        "Any", "toggle", previous_mode="thinking_toggle", temperature=1.4, thinking=True
+    )
+    from_temperature = controller.control_view(
+        "Any", "toggle", previous_mode="temperature", temperature=1.2, thinking=True
+    )
+    settings = controller._settings(
+        "motif", "C", "Major", "Ollama", "toggle", 1.4, 1.4, True, None
+    )
+
+    assert view.thinking_visible is True
+    assert view.thinking_value is True
+    assert view.temperature_value == 1.4
+    assert view.temperature_interactive is True
+    assert from_temperature.temperature_value == 1.2
+    assert from_temperature.thinking_value is False
+    assert settings.extended_thinking is True
+    assert settings.effective_temperature == 1.4
+    assert settings.effort is None
 
 
 def test_legacy_thinking_disables_slider_at_effective_one():

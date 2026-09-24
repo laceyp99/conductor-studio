@@ -63,7 +63,9 @@ Ollama models are discovered when the page loads and again on **Refresh Ollama
 models**. Their controls use the same rules, based on the per-model capabilities
 Core reads from Ollama: an effort dropdown when Ollama reports effort levels, an
 extended-thinking toggle for other reasoning models, and temperature only
-otherwise. With thinking enabled, small local models can use up Ollama's
+otherwise. Unlike cloud models, the Ollama thinking toggle leaves temperature
+adjustable, because Core sends the chosen temperature to Ollama alongside the
+thinking flag. With thinking enabled, small local models can use up Ollama's
 output-length limit before finishing all four variations; turn thinking off if
 batches fail with truncated or empty responses.
 

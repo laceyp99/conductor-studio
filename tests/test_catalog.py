@@ -104,7 +104,7 @@ def test_ollama_controls_follow_core_model_capabilities() -> None:
 
     assert catalog.lookup("Ollama", "plain").control_mode == "temperature"
     toggle = catalog.lookup("Ollama", "toggle")
-    assert toggle.control_mode == "legacy_thinking"
+    assert toggle.control_mode == "thinking_toggle"
     assert toggle.effort_options == ()
     levels = catalog.lookup("Ollama", "levels")
     assert levels.control_mode == "effort"

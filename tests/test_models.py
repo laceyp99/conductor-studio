@@ -76,6 +76,20 @@ def test_settings_are_immutable_and_controls_are_coherent():
     )
 
 
+def test_only_ollama_thinking_keeps_the_requested_temperature():
+    ollama = settings(
+        provider="Ollama",
+        requested_temperature=0.4,
+        effective_temperature=0.4,
+        extended_thinking=True,
+    )
+    assert ollama.effective_temperature == 0.4
+    with pytest.raises(ValidationError, match=r"temperature 1.0"):
+        settings(
+            requested_temperature=0.4, effective_temperature=0.4, extended_thinking=True
+        )
+
+
 def test_round_trip_preserves_accounting_and_optional_media():
     value = manifest()
     publish(value)

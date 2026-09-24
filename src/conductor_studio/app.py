@@ -19,6 +19,9 @@ from .models import (
 )
 
 DEFAULT_TEMPERATURE = 0.7
+# Modes where temperature stays user-controlled; thinking_toggle is Ollama's
+# thinking switch, which does not lock temperature.
+_FREE_TEMPERATURE_MODES = frozenset({"temperature", "thinking_toggle"})
 _UNSET = object()
 _CSS = """
 :root { --studio-ink:#10141d; --studio-panel:#171d29; --studio-line:#344156; }
@@ -28,6 +31,9 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
 .piano-roll img { object-fit:contain !important; background:#10141d; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
+.thinking-toggle { display:flex; flex-direction:column; gap:var(--spacing-lg); }
+.thinking-toggle .info-text { order:-1; margin:0; color:var(--block-title-text-color); font-size:var(--block-title-text-size); font-weight:var(--block-title-text-weight); }
+.thinking-toggle .checkbox-container { border:1px solid var(--input-border-color); border-radius:var(--input-radius); background:var(--input-background-fill); padding:var(--input-padding); box-shadow:var(--input-shadow); cursor:pointer; }
 @media (max-width:820px) { #variant-grid { grid-template-columns:minmax(0,1fr) !important; } }
 """
 
@@ -113,6 +119,8 @@ def _slot_metadata(manifest: SessionManifest) -> str:
             else "temperature unavailable"
         )
     )
+    if settings.extended_thinking and not settings.effort:
+        control += " · thinking"
     return f"{settings.provider} · {settings.model} · {control}"
 
 
@@ -265,6 +273,17 @@ class StudioController:
                 effective_temperature=None,
                 extended_thinking=True,
                 effort=effort,
+            )
+        if mode == "thinking_toggle":
+            return SessionSettings(
+                prompt=prompt,
+                key=key,
+                scale=scale,
+                provider=provider,
+                model=model,
+                requested_temperature=temperature,
+                effective_temperature=temperature,
+                extended_thinking=thinking,
             )
         requested = (
             requested_temperature
@@ -453,13 +472,13 @@ class StudioController:
         if mode == "effort":
             temperature = requested_temperature = DEFAULT_TEMPERATURE
             thinking = False
-        elif mode == "temperature":
-            if previous_mode != "temperature":
+        elif mode in _FREE_TEMPERATURE_MODES:
+            if previous_mode not in _FREE_TEMPERATURE_MODES:
                 temperature = requested_temperature = DEFAULT_TEMPERATURE
-            thinking = False
+            thinking = thinking and previous_mode == mode == "thinking_toggle"
         else:
             thinking = thinking if previous_mode == "legacy_thinking" else False
-            if previous_mode == "temperature":
+            if previous_mode in _FREE_TEMPERATURE_MODES:
                 requested_temperature = temperature
             elif previous_mode != "legacy_thinking":
                 requested_temperature = DEFAULT_TEMPERATURE
@@ -472,7 +491,7 @@ class StudioController:
             requested_temperature,
             mode != "effort",
             mode != "legacy_thinking" or not thinking,
-            mode == "legacy_thinking",
+            mode in {"legacy_thinking", "thinking_toggle"},
             thinking,
             efforts,
             selected_effort,
@@ -712,6 +731,8 @@ def create_app(
                             value=controls.thinking_value,
                             visible=controls.thinking_visible,
                             label="Extended thinking",
+                            info="Reasoning",
+                            elem_classes=["thinking-toggle"],
                         )
                         effort = gr.Dropdown(
                             controls.effort_choices,
@@ -881,11 +902,15 @@ def create_app(
             controls_event, control_inputs, control_outputs, api_visibility="private"
         )
         thinking.change(
-            lambda enabled, requested: (
-                _update(1.0 if enabled else requested, interactive=not enabled),
-                requested,
+            lambda enabled, requested, mode: (
+                (gr.skip(), gr.skip())
+                if mode != "legacy_thinking"
+                else (
+                    _update(1.0 if enabled else requested, interactive=not enabled),
+                    requested,
+                )
             ),
-            [thinking, requested_temperature],
+            [thinking, requested_temperature, control_mode],
             [temperature, requested_temperature],
             api_visibility="private",
         )
