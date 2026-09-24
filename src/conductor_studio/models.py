@@ -10,6 +10,11 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Providers whose thinking toggle leaves temperature unchanged.  Core forwards
+# the requested temperature alongside Ollama's ``think`` flag, so the cloud
+# "thinking forces temperature 1.0" rule does not apply there.
+INDEPENDENT_THINKING_PROVIDERS = frozenset({"Ollama"})
+
 
 class _ValueEnum(str, Enum):
     def __str__(self) -> str:
@@ -120,6 +125,7 @@ class SessionSettings(BaseModel):
         if (
             self.extended_thinking
             and self.effort is None
+            and self.provider not in INDEPENDENT_THINKING_PROVIDERS
             and self.effective_temperature != 1.0
         ):
             raise ValueError("extended thinking requires effective temperature 1.0")

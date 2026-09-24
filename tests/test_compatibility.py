@@ -9,7 +9,7 @@ from conductor_core import music, playback
 
 
 def test_core_public_contract_is_available() -> None:
-    assert version("conductor-core") == "0.5.3"
+    assert version("conductor-core") == "0.5.6"
 
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
@@ -97,6 +97,22 @@ def test_core_variation_contract_is_available() -> None:
         is conductor_core.VariationGenerationRequest
     )
     assert method_signature.return_annotation is conductor_core.VariationBatchResult
+
+
+def test_core_ollama_status_contract_matches_studio_loader() -> None:
+    from conductor_core.providers.ollama import get_ollama_status, variations_gen
+
+    assert list(signature(get_ollama_status).parameters) == [
+        "host_address",
+        "request_timeout",
+    ]
+    offline = get_ollama_status(host_address="http://127.0.0.1:9", request_timeout=0.1)
+    assert {"available", "models", "model_capabilities", "host", "error"} <= set(
+        offline
+    )
+    assert {"use_thinking", "effort", "model_capabilities"} <= set(
+        signature(variations_gen).parameters
+    )
 
 
 def test_core_metadata_and_offline_resources_load() -> None:

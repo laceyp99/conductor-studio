@@ -19,6 +19,9 @@ from .models import (
 )
 
 DEFAULT_TEMPERATURE = 0.7
+# Modes where temperature stays user-controlled; thinking_toggle is Ollama's
+# thinking switch, which does not lock temperature.
+_FREE_TEMPERATURE_MODES = frozenset({"temperature", "thinking_toggle"})
 _UNSET = object()
 _CSS = """
 :root { --studio-ink:#10141d; --studio-panel:#171d29; --studio-line:#344156; }
@@ -28,6 +31,9 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
 .piano-roll img { object-fit:contain !important; background:#10141d; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
+.thinking-toggle { display:flex; flex-direction:column; gap:var(--spacing-lg); }
+.thinking-toggle .info-text { order:-1; margin:0; color:var(--block-title-text-color); font-size:var(--block-title-text-size); font-weight:var(--block-title-text-weight); }
+.thinking-toggle .checkbox-container { border:1px solid var(--input-border-color); border-radius:var(--input-radius); background:var(--input-background-fill); padding:var(--input-padding); box-shadow:var(--input-shadow); cursor:pointer; }
 @media (max-width:820px) { #variant-grid { grid-template-columns:minmax(0,1fr) !important; } }
 """
 
@@ -113,6 +119,8 @@ def _slot_metadata(manifest: SessionManifest) -> str:
             else "temperature unavailable"
         )
     )
+    if settings.extended_thinking and not settings.effort:
+        control += " · thinking"
     return f"{settings.provider} · {settings.model} · {control}"
 
 
@@ -266,6 +274,17 @@ class StudioController:
                 extended_thinking=True,
                 effort=effort,
             )
+        if mode == "thinking_toggle":
+            return SessionSettings(
+                prompt=prompt,
+                key=key,
+                scale=scale,
+                provider=provider,
+                model=model,
+                requested_temperature=temperature,
+                effective_temperature=temperature,
+                extended_thinking=thinking,
+            )
         requested = (
             requested_temperature
             if mode == "legacy_thinking" and thinking
@@ -369,12 +388,22 @@ class StudioController:
         return _library_view(self.service)
 
     def credentials_view(self) -> CredentialView:
-        return CredentialView(
-            ", ".join(
-                f"{s.provider.title()}: {s.label()}"
-                for s in self.credentials.statuses().values()
-            )
-        )
+        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
+
+        parts = []
+        for s in self.credentials.statuses().values():
+            label = f"{s.provider.title()}: {s.label()}"
+            if s.provider == "ollama":
+                # Hosts are not secrets; show the effective origin so users can
+                # see what an override replaced.  Userinfo is never displayed.
+                host = self.credentials.resolve("ollama")
+                label += (
+                    f" ({_safe_host_label(host)})"
+                    if host
+                    else f" (default {DEFAULT_OLLAMA_HOST})"
+                )
+            parts.append(label)
+        return CredentialView(", ".join(parts))
 
     @staticmethod
     def audio_status() -> str:
@@ -392,7 +421,9 @@ class StudioController:
             ("google", google),
             ("ollama", ollama),
         ):
-            self.credentials.set_override(provider, value)
+            # Blank fields keep the current value; use Clear to remove overrides.
+            if value and value.strip():
+                self.credentials.set_override(provider, value)
         return self.credentials_view()
 
     def clear_credentials(self) -> CredentialView:
@@ -441,13 +472,13 @@ class StudioController:
         if mode == "effort":
             temperature = requested_temperature = DEFAULT_TEMPERATURE
             thinking = False
-        elif mode == "temperature":
-            if previous_mode != "temperature":
+        elif mode in _FREE_TEMPERATURE_MODES:
+            if previous_mode not in _FREE_TEMPERATURE_MODES:
                 temperature = requested_temperature = DEFAULT_TEMPERATURE
-            thinking = False
+            thinking = thinking and previous_mode == mode == "thinking_toggle"
         else:
             thinking = thinking if previous_mode == "legacy_thinking" else False
-            if previous_mode == "temperature":
+            if previous_mode in _FREE_TEMPERATURE_MODES:
                 requested_temperature = temperature
             elif previous_mode != "legacy_thinking":
                 requested_temperature = DEFAULT_TEMPERATURE
@@ -460,7 +491,7 @@ class StudioController:
             requested_temperature,
             mode != "effort",
             mode != "legacy_thinking" or not thinking,
-            mode == "legacy_thinking",
+            mode in {"legacy_thinking", "thinking_toggle"},
             thinking,
             efforts,
             selected_effort,
@@ -468,7 +499,12 @@ class StudioController:
         )
 
     def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
-        readiness = self.catalog.refresh_ollama(host or None)
+        # Discover models on the same host generation will use: a typed host
+        # becomes the in-memory override, otherwise the saved override or
+        # environment value applies.
+        if host and host.strip():
+            self.credentials.set_override("ollama", host)
+        readiness = self.catalog.refresh_ollama(self.credentials.resolve("ollama"))
         view = self.control_view("Ollama")
         return view, (
             f"Ollama ready · {len(readiness.models)} model(s) discovered."
@@ -695,6 +731,8 @@ def create_app(
                             value=controls.thinking_value,
                             visible=controls.thinking_visible,
                             label="Extended thinking",
+                            info="Reasoning",
+                            elem_classes=["thinking-toggle"],
                         )
                         effort = gr.Dropdown(
                             controls.effort_choices,
@@ -864,11 +902,15 @@ def create_app(
             controls_event, control_inputs, control_outputs, api_visibility="private"
         )
         thinking.change(
-            lambda enabled, requested: (
-                _update(1.0 if enabled else requested, interactive=not enabled),
-                requested,
+            lambda enabled, requested, mode: (
+                (gr.skip(), gr.skip())
+                if mode != "legacy_thinking"
+                else (
+                    _update(1.0 if enabled else requested, interactive=not enabled),
+                    requested,
+                )
             ),
-            [thinking, requested_temperature],
+            [thinking, requested_temperature, control_mode],
             [temperature, requested_temperature],
             api_visibility="private",
         )
@@ -926,7 +968,7 @@ def create_app(
                 _update(""),
                 _update(""),
                 _update(""),
-                _update(""),
+                _update(d.strip() if d else ""),
             ),
             [openai_secret, anthropic_secret, google_secret, ollama_host],
             secret_outputs,
@@ -944,26 +986,55 @@ def create_app(
             secret_outputs,
             api_visibility="private",
         )
+        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
         refresh_ollama.click(
-            lambda host: _ollama_values(controller, host),
-            ollama_host,
-            [provider, model, ollama_notice],
+            lambda host, current: _ollama_values(controller, host, current, True),
+            [ollama_host, provider],
+            ollama_outputs,
+            api_visibility="private",
+        )
+        # Discovery is a local, non-billable status check; run it on page load
+        # so Ollama appears without a manual refresh.  Never switch providers.
+        app.load(
+            lambda current: _ollama_values(controller, "", current, False),
+            provider,
+            ollama_outputs,
             api_visibility="private",
         )
     app.queue(default_concurrency_limit=1)
     return app
 
 
-def _ollama_values(controller: StudioController, host: str) -> tuple[Any, Any, str]:
-    controls, notice = controller.refresh_ollama(host)
+def _ollama_values(
+    controller: StudioController, host: str, current: str | None, select: bool
+) -> tuple[Any, ...]:
+    """Update the provider list and, when it changes, every dependent control.
+
+    Returning the complete control set in one event avoids chained provider and
+    model change events validating a stale effort value against new choices.
+    """
+    ollama, notice = controller.refresh_ollama(host)
+    providers = tuple(controller.catalog.providers())
+    if select and ollama.model_choices:
+        selected, controls = "Ollama", ollama
+    elif current in providers:
+        selected, controls = current, None
+    else:
+        selected = providers[0] if providers else None
+        controls = controller.control_view(selected) if selected else None
+    control_values = _control_values(controls) if controls else (_skip(),) * 6
     return (
-        _update(
-            choices=list(controller.catalog.providers()),
-            value="Ollama" if controls.model_choices else None,
-        ),
-        _control_values(controls)[0],
+        _update(choices=list(providers), value=selected),
+        *control_values,
         notice,
+        controller.credentials_view().status,
     )
+
+
+def _skip() -> Any:
+    import gradio as gr
+
+    return gr.skip()
 
 
 __all__ = [

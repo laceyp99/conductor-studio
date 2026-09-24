@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.5.3 from the immutable peeled commit below,
+Studio installs Conductor Core v0.5.6 from the immutable peeled commit below,
 never from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-bc60d017b8a561cb77d7858960e60b9584dfacf7
+c16fa95565d2d9cbfbcea1074a17660953424a71
 ```
 
 ## Credentials and controls
@@ -58,6 +58,16 @@ temperature with an extended-thinking toggle. The default requested temperature
 is `0.7` over Core's `0.0`–`2.0` range. Extended thinking may make the effective
 temperature `1.0`. The pinned Core contract has no seed field, so Studio neither
 offers nor emulates one.
+
+Ollama models are discovered when the page loads and again on **Refresh Ollama
+models**. Their controls use the same rules, based on the per-model capabilities
+Core reads from Ollama: an effort dropdown when Ollama reports effort levels, an
+extended-thinking toggle for other reasoning models, and temperature only
+otherwise. Unlike cloud models, the Ollama thinking toggle leaves temperature
+adjustable, because Core sends the chosen temperature to Ollama alongside the
+thinking flag. With thinking enabled, small local models can use up Ollama's
+output-length limit before finishing all four variations; turn thinking off if
+batches fail with truncated or empty responses.
 
 ## Batch workflow and accounting
 

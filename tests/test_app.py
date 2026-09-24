@@ -9,6 +9,7 @@ from conductor_studio.app import (
     StudioController,
     _card_view,
     _empty_card,
+    _ollama_values,
     _view_for_manifest,
     _view_values,
     create_app,
@@ -158,6 +159,9 @@ class _ControlCatalog:
             "legacy": SimpleNamespace(
                 model="legacy", control_mode="legacy_thinking", effort_options=()
             ),
+            "toggle": SimpleNamespace(
+                model="toggle", control_mode="thinking_toggle", effort_options=()
+            ),
         }
 
     def models(self, provider):
@@ -165,6 +169,113 @@ class _ControlCatalog:
 
     def lookup(self, provider, model):
         return self.items[model]
+
+
+class _OllamaCatalog(_Catalog):
+    def __init__(self, models=()):
+        self.hosts = []
+        self.discovered = tuple(models)
+
+    def providers(self):
+        return ("OpenAI", "Ollama") if self.discovered else ("OpenAI",)
+
+    def models(self, provider):
+        if provider == "Ollama":
+            return tuple(
+                SimpleNamespace(
+                    model=model, control_mode="temperature", effort_options=()
+                )
+                for model in self.discovered
+            )
+        return (
+            SimpleNamespace(
+                model="gpt-5", control_mode="effort", effort_options=("low", "high")
+            ),
+        )
+
+    def refresh_ollama(self, host):
+        self.hosts.append(host)
+        return SimpleNamespace(
+            available=bool(self.discovered), models=self.discovered, error=None
+        )
+
+
+def test_ollama_refresh_discovers_on_the_generation_host():
+    catalog = _OllamaCatalog()
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://env-host:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials, object())
+
+    controller.refresh_ollama("")
+    credentials.set_override("ollama", "http://saved-host:11434")
+    controller.refresh_ollama("  ")
+    controller.refresh_ollama(" http://typed-host:11434 ")
+
+    assert catalog.hosts == [
+        "http://env-host:11434",
+        "http://saved-host:11434",
+        "http://typed-host:11434",
+    ]
+    assert credentials.provider_credentials().ollama_host == "http://typed-host:11434"
+
+
+def test_ollama_refresh_selects_ollama_with_complete_temperature_controls():
+    controller = StudioController(
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+    )
+    provider, model, _, _, _, effort, mode, notice, _ = _ollama_values(
+        controller, "", "OpenAI", True
+    )
+
+    assert provider["choices"] == ["OpenAI", "Ollama"]
+    assert provider["value"] == "Ollama"
+    assert model["value"] == "llama3"
+    assert effort["choices"] == []
+    assert effort["value"] is None
+    assert effort["visible"] is False
+    assert mode == "temperature"
+    assert "1 model" in notice
+
+
+def test_ollama_page_load_adds_provider_without_switching_or_touching_controls():
+    import gradio as gr
+
+    controller = StudioController(
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+    )
+    provider, *controls, _, _ = _ollama_values(controller, "", "OpenAI", False)
+
+    assert provider["value"] == "OpenAI"
+    assert all(value == gr.skip() for value in controls)
+
+
+def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
+    controller = StudioController(
+        object(), _OllamaCatalog(), CredentialStore(environment={}), object()
+    )
+    provider, model, *_ = _ollama_values(controller, "", "Ollama", True)
+
+    assert provider["value"] == "OpenAI"
+    assert model["value"] == "gpt-5"
+
+
+def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
+    credentials = CredentialStore(environment={})
+    controller = StudioController(object(), _Catalog(), credentials, object())
+
+    assert "Ollama: Not configured (default http://localhost:11434)" in (
+        controller.credentials_view().status
+    )
+    controller.save_credentials("sk-first", "", "", "")
+    status = controller.save_credentials(
+        "", "", "", "http://user:pw@gpu-box:11434/"
+    ).status
+
+    assert credentials.resolve("openai") == "sk-first"
+    assert "Ollama: Session override (http://gpu-box:11434)" in status
+    assert "sk-first" not in status
+    assert "pw" not in status
 
 
 def test_control_transitions_preserve_only_supported_values():
@@ -192,6 +303,29 @@ def test_control_transitions_preserve_only_supported_values():
     assert returned.temperature_value == 0.7
     assert legacy.temperature_value == 1.4
     assert legacy.thinking_value is False
+
+
+def test_ollama_thinking_toggle_keeps_temperature_user_controlled():
+    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    view = controller.control_view(
+        "Any", "toggle", previous_mode="thinking_toggle", temperature=1.4, thinking=True
+    )
+    from_temperature = controller.control_view(
+        "Any", "toggle", previous_mode="temperature", temperature=1.2, thinking=True
+    )
+    settings = controller._settings(
+        "motif", "C", "Major", "Ollama", "toggle", 1.4, 1.4, True, None
+    )
+
+    assert view.thinking_visible is True
+    assert view.thinking_value is True
+    assert view.temperature_value == 1.4
+    assert view.temperature_interactive is True
+    assert from_temperature.temperature_value == 1.2
+    assert from_temperature.thinking_value is False
+    assert settings.extended_thinking is True
+    assert settings.effective_temperature == 1.4
+    assert settings.effort is None
 
 
 def test_legacy_thinking_disables_slider_at_effective_one():

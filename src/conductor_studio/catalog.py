@@ -13,6 +13,7 @@ from conductor_core import music
 CORE_CLOUD_PROVIDERS = ("OpenAI", "Google", "Anthropic")
 OLLAMA_PROVIDER = "Ollama"
 DEFAULT_OLLAMA_TIMEOUT = 2.0
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
 class CatalogError(ValueError):
@@ -162,6 +163,46 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
     )
 
 
+def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
+    """Map Core's per-model Ollama capabilities onto Studio controls.
+
+    A model without Core capability data (inspection failed, or an older
+    loader) stays temperature-only rather than guessing thinking support.
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise CatalogError(f"Ollama/{model} capabilities must be an object")
+    thinking = _bool(raw, "extended_thinking")
+    efforts = _efforts(raw)
+    if efforts and not thinking:
+        raise CatalogError(f"Ollama/{model} effort_options require extended_thinking")
+    temp_supported = _bool(raw, "temperature_supported", True)
+    mode = _control_mode(
+        thinking_supported=thinking,
+        efforts=efforts,
+        temperature_supported=temp_supported,
+    )
+    # Ollama-specific: Core sends the requested temperature with ``think``, so
+    # the thinking toggle must not lock temperature the way legacy cloud
+    # thinking does.
+    if mode == "legacy_thinking":
+        mode = "thinking_toggle"
+    return ModelCapability(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        display_name=model,
+        thinking_supported=thinking,
+        effort_options=efforts,
+        min_thinking_budget=None,
+        max_thinking_budget=None,
+        always_on_adaptive_thinking=False,
+        temperature_supported=temp_supported,
+        control_mode=mode,
+        rpm=None,
+    )
+
+
 def _default_ollama_loader(**kwargs: Any) -> Mapping[str, Any]:
     from conductor_core.providers.ollama import get_ollama_status
 
@@ -180,12 +221,12 @@ def _invoke_loader(loader: Callable[..., Any], host: str, timeout: float) -> Any
     except (TypeError, ValueError):
         accepts_kwargs = True
         parameters = {}
-    # The real Core loader accepts the canonical names below.  Aliases are
+    # These are exactly the parameters of the pinned Core
+    # ``get_ollama_status``; a contract test guards the match.  Aliases are
     # useful only for narrow injected test/application loaders with an
     # explicit signature; never send them to a ``**kwargs`` loader because it
     # may forward unknown names to Core.
     candidates = {
-        "force_refresh": True,
         "host_address": host,
         "request_timeout": timeout,
     }
@@ -238,7 +279,7 @@ class ModelCatalog:
         self.ollama_timeout = float(ollama_timeout)
         self._cloud: dict[str, tuple[ModelCapability, ...]] = {}
         self._ollama: tuple[ModelCapability, ...] = ()
-        self._ollama_status = OllamaReadiness(False, (), "http://localhost:11434")
+        self._ollama_status = OllamaReadiness(False, (), DEFAULT_OLLAMA_HOST)
         self.refresh()
 
     def refresh(self) -> tuple[ModelCapability, ...]:
@@ -307,7 +348,7 @@ class ModelCatalog:
     capability = lookup
 
     def refresh_ollama(self, host: str | None = None) -> OllamaReadiness:
-        selected_host = host or "http://localhost:11434"
+        selected_host = host or DEFAULT_OLLAMA_HOST
         try:
             raw_status = _invoke_loader(
                 self._ollama_status_loader, selected_host, self.ollama_timeout
@@ -337,6 +378,11 @@ class ModelCatalog:
                 raise CatalogError("Ollama model IDs must be nonblank strings")
             if model not in model_ids:
                 model_ids.append(model)
+        raw_capabilities = raw_status.get("model_capabilities")
+        if raw_capabilities is None:
+            raw_capabilities = {}
+        if not isinstance(raw_capabilities, Mapping):
+            raise CatalogError("Ollama model_capabilities must be an object")
         error = raw_status.get("error")
         if error is not None and not isinstance(error, str):
             raise CatalogError("Ollama status error must be a string or null")
@@ -347,20 +393,7 @@ class ModelCatalog:
             error="Ollama is unavailable at the configured host." if error else None,
         )
         self._ollama = tuple(
-            ModelCapability(
-                provider=OLLAMA_PROVIDER,
-                model=model,
-                display_name=model,
-                thinking_supported=False,
-                effort_options=(),
-                min_thinking_budget=None,
-                max_thinking_budget=None,
-                always_on_adaptive_thinking=False,
-                temperature_supported=True,
-                control_mode="temperature",
-                rpm=None,
-                available=True,
-            )
+            _normalize_ollama_model(model, raw_capabilities.get(model))
             for model in self._ollama_status.models
         )
         return self._ollama_status
@@ -371,6 +404,7 @@ class ModelCatalog:
 
 __all__ = [
     "CORE_CLOUD_PROVIDERS",
+    "DEFAULT_OLLAMA_HOST",
     "DEFAULT_OLLAMA_TIMEOUT",
     "OLLAMA_PROVIDER",
     "CatalogError",
