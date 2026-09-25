@@ -714,6 +714,7 @@ def create_app(
                     # parameters on the right, side by side.
                     with gr.Row(elem_id="generation-controls"):
                         with gr.Column(scale=1, elem_id="loop-controls"):
+                            gr.Markdown("## Loop Parameters")
                             key = gr.Dropdown(
                                 [
                                     "C",
@@ -742,6 +743,7 @@ def create_app(
                                 placeholder="A warm four-bar synth motif...",
                             )
                         with gr.Column(scale=1, elem_id="model-controls"):
+                            gr.Markdown("## Generation Parameters")
                             provider = gr.Dropdown(
                                 providers, value=provider_value, label="Provider"
                             )
