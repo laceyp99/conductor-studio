@@ -495,16 +495,6 @@ class StudioController:
             context_visible=provider == "Ollama",
         )
 
-    def temperature_locked(
-        self, provider: str, model: str, thinking: bool, effort: str | None = None
-    ) -> bool:
-        """Whether the slider shows a fixed thinking temperature, not a choice."""
-        try:
-            capability = self.catalog.lookup(provider, model)
-        except Exception:
-            return False
-        return _temperature_locked(capability, thinking, effort)
-
     def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
         # Discover models on the same host generation will use: a typed host
         # becomes the in-memory override, otherwise the saved override or
@@ -522,10 +512,7 @@ class StudioController:
 
 def _temperature_locked(capability: Any, thinking: bool, effort: str | None) -> bool:
     """Whether the UI choice makes Core send the model's fixed temperature."""
-    try:
-        use_thinking, _ = capability.reasoning(thinking, effort)
-    except ValueError:  # a level left over from the previous model
-        return False
+    use_thinking, _ = capability.reasoning(thinking, effort)
     return _fixes_temperature(capability, use_thinking)
 
 
@@ -939,10 +926,14 @@ def create_app(
                 )
             )
 
-        provider.change(
+        # Listen for user input only. ``.change`` also fires on the updates these
+        # handlers return, and those chained events can reach the server with a
+        # model from the previous provider after its choices were replaced,
+        # which Gradio rejects before any handler runs.
+        provider.input(
             current_controls, control_inputs, control_outputs, api_visibility="private"
         )
-        model.change(
+        model.input(
             current_controls, control_inputs, control_outputs, api_visibility="private"
         )
 
@@ -952,21 +943,17 @@ def create_app(
             return current_controls(*values)[1]
 
         for reasoning_control in (thinking, effort):
-            reasoning_control.change(
+            reasoning_control.input(
                 reasoning_temperature,
                 control_inputs,
                 temperature,
                 api_visibility="private",
             )
-        temperature.change(
-            lambda value, selected_provider, selected_model, enabled, level: (
-                gr.skip()
-                if controller.temperature_locked(
-                    selected_provider, selected_model, enabled, level
-                )
-                else value
-            ),
-            [temperature, provider, model, thinking, effort],
+        # A locked slider is not interactive, so user input is always a free
+        # choice to remember across models and thinking changes.
+        temperature.input(
+            lambda value: value,
+            temperature,
             requested_temperature,
             api_visibility="private",
         )
