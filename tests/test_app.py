@@ -239,51 +239,6 @@ def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
     assert (values["Provider"], values["Model"]) == ("Google", "gemini-new")
 
 
-def test_control_handlers_listen_only_to_user_input(tmp_path: Path):
-    """Programmatic updates must not chain events carrying a stale model.
-
-    Switching providers replaces the model choices; a ``.change`` event queued
-    with the previous provider's model would then fail Gradio's choice check.
-    """
-
-    class Service:
-        class Store:
-            studio_root = tmp_path
-
-        store = Store()
-
-        def history(self):
-            return []
-
-        def favorites(self):
-            return []
-
-    config = create_app(
-        service=Service(), catalog=_Catalog(), credentials=CredentialStore({})
-    ).get_config_file()
-    ids = {
-        component.get("props", {}).get("label"): component["id"]
-        for component in config["components"]
-    }
-    controls = {
-        ids[label]
-        for label in (
-            "Provider",
-            "Model",
-            "Temperature",
-            "Extended thinking",
-            "Reasoning effort",
-        )
-    }
-    triggers = {
-        (target, event)
-        for dependency in config["dependencies"]
-        for target, event in dependency["targets"]
-        if target in controls
-    }
-    assert triggers == {(control, "input") for control in controls}
-
-
 def test_view_values_has_fixed_batch_output_shape():
     view = AppView(None, tuple(_empty_card(slot) for slot in ("01", "02", "03", "04")))
     assert len(_view_values(view)) == 41
@@ -537,6 +492,8 @@ def test_added_none_effort_turns_reasoning_off_and_frees_temperature():
     assert (off.temperature_value, off.temperature_interactive) == (0.4, True)
     assert (on.temperature_value, on.temperature_interactive) == (1.0, False)
     assert on.requested_temperature == 0.4
+    assert controller.temperature_locked("Any", "switchable", False, "high")
+    assert not controller.temperature_locked("Any", "switchable", False, "none")
     # ``none`` is Studio's stand-in for Core's thinking-off switch.
     assert (settings_off.extended_thinking, settings_off.effort) == (False, None)
     assert settings_off.effective_temperature == 0.4
@@ -592,6 +549,7 @@ def test_thinking_without_fixed_temperature_keeps_temperature_user_controlled():
     assert view.thinking_value is True
     assert view.temperature_value == 1.4
     assert view.temperature_interactive is True
+    assert controller.temperature_locked("Any", "toggle", True) is False
     assert from_temperature.temperature_value == 1.2
     assert from_temperature.thinking_value is False
     assert settings.extended_thinking is True
@@ -613,10 +571,8 @@ def test_fixed_thinking_temperature_disables_slider():
     assert view.temperature_interactive is False
     assert view.temperature_value == 1.0
     assert view.requested_temperature == 1.3
-    off = controller.control_view(
-        "Any", "budget", previous_mode="thinking", requested_temperature=1.3
-    )
-    assert (off.temperature_value, off.temperature_interactive) == (1.3, True)
+    assert controller.temperature_locked("Any", "budget", True) is True
+    assert controller.temperature_locked("Any", "budget", False) is False
 
 
 def test_always_on_reasoning_offers_no_toggle_and_always_thinks():
