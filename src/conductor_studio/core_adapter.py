@@ -73,7 +73,14 @@ def _safe(value: Any, limit: int = 500) -> str:
 
 def _failure(error: BaseException) -> AdapterFailure:
     name, detail = type(error).__name__.lower(), str(error).lower()
-    if any(
+    if isinstance(error, conductor_core.ProviderContextLengthError):
+        category, message = (
+            ErrorCategory.PROVIDER,
+            "The model ran out of context before finishing all four variations. "
+            "Lower or turn off thinking, choose a model with a larger context, "
+            "or set a larger Ollama context window.",
+        )
+    elif any(
         x in name or x in detail
         for x in (
             "credential",
@@ -168,6 +175,8 @@ class CoreAdapter:
         }
         if settings.effective_temperature is not None:
             kwargs["temperature"] = settings.effective_temperature
+        if settings.ollama_num_ctx is not None:
+            kwargs["ollama_num_ctx"] = settings.ollama_num_ctx
         return conductor_core.VariationGenerationRequest(**kwargs)
 
     @staticmethod

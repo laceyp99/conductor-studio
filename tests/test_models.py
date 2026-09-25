@@ -76,18 +76,40 @@ def test_settings_are_immutable_and_controls_are_coherent():
     )
 
 
-def test_only_ollama_thinking_keeps_the_requested_temperature():
-    ollama = settings(
-        provider="Ollama",
-        requested_temperature=0.4,
-        effective_temperature=0.4,
-        extended_thinking=True,
+def test_thinking_temperature_follows_metadata_not_provider():
+    # Any provider may keep the requested temperature while thinking; only a
+    # model's thinking_fixed_temperature (applied by the caller) changes it.
+    thinking = settings(
+        requested_temperature=0.4, effective_temperature=0.4, extended_thinking=True
     )
-    assert ollama.effective_temperature == 0.4
-    with pytest.raises(ValidationError, match=r"temperature 1.0"):
-        settings(
-            requested_temperature=0.4, effective_temperature=0.4, extended_thinking=True
-        )
+    assert thinking.effective_temperature == 0.4
+    both = settings(
+        requested_temperature=0.4,
+        effective_temperature=1.0,
+        extended_thinking=True,
+        effort="high",
+    )
+    assert (both.effort, both.effective_temperature) == ("high", 1.0)
+    with pytest.raises(ValidationError, match=r"only while thinking"):
+        settings(requested_temperature=0.4, effective_temperature=1.0)
+
+
+def test_context_window_is_ollama_only_and_positive():
+    assert settings(provider="Ollama", ollama_num_ctx=8192).ollama_num_ctx == 8192
+    with pytest.raises(ValidationError, match=r"only to Ollama"):
+        settings(ollama_num_ctx=8192)
+    for invalid in (0, -1, 1.5, True):
+        with pytest.raises(ValidationError):
+            settings(provider="Ollama", ollama_num_ctx=invalid)
+
+
+def test_pre_060_manifest_settings_still_load():
+    legacy = SessionSettings.model_validate_json(
+        '{"prompt": "p", "provider": "Anthropic", "model": "claude-opus-4-6",'
+        ' "requested_temperature": null, "effective_temperature": null,'
+        ' "extended_thinking": true, "effort": "low"}'
+    )
+    assert legacy.ollama_num_ctx is None
 
 
 def test_round_trip_preserves_accounting_and_optional_media():

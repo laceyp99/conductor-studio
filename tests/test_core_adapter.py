@@ -2,7 +2,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conductor_core import ProgressEvent, ProviderCredentials
+from conductor_core import (
+    ProgressEvent,
+    ProviderContextLengthError,
+    ProviderCredentials,
+)
 
 from conductor_studio.core_adapter import (
     AdapterFailure,
@@ -101,7 +105,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.5.6", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.6.0", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -157,6 +161,58 @@ def test_provider_error_is_sanitized(tmp_path):
     assert outcome.failure.category is ErrorCategory.PROVIDER
     assert "secret" not in outcome.failure.message.lower()
     assert "sk-super-secret" not in outcome.diagnostic
+
+
+def test_context_length_error_explains_how_to_recover(tmp_path):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise ProviderContextLengthError(
+                "Ollama", "qwen", prompt_tokens=900, output_tokens=3100
+            )
+
+    outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(_manifest())
+    assert isinstance(outcome, AdapterFailure)
+    assert outcome.failure.category is ErrorCategory.PROVIDER
+    assert "ran out of context" in outcome.failure.message
+    assert "Ollama context window" in outcome.failure.message
+
+
+def test_request_sends_context_window_and_thinking_temperature(tmp_path):
+    adapter = CoreAdapter(tmp_path)
+    ollama = create_manifest(
+        SessionSettings(
+            prompt="pulse",
+            provider="Ollama",
+            model="qwen",
+            requested_temperature=0.4,
+            effective_temperature=0.4,
+            extended_thinking=True,
+            ollama_num_ctx=8192,
+        ),
+        core_version="0.6.0",
+    )
+    fixed = create_manifest(
+        SessionSettings(
+            prompt="pulse",
+            provider="Anthropic",
+            model="claude-sonnet-4-6",
+            requested_temperature=0.4,
+            effective_temperature=1.0,
+            extended_thinking=True,
+            effort="high",
+        ),
+        core_version="0.6.0",
+    )
+
+    ollama_request = adapter.build_request(ollama)
+    fixed_request = adapter.build_request(fixed)
+    assert (ollama_request.ollama_num_ctx, ollama_request.temperature) == (8192, 0.4)
+    assert ollama_request.use_thinking is True
+    assert fixed_request.ollama_num_ctx is None
+    assert (fixed_request.effort, fixed_request.temperature) == ("high", 1.0)
 
 
 def test_audio_only_render_uses_variant_preview(tmp_path):

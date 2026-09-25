@@ -10,6 +10,17 @@
 - Keep model/provider controls capability-driven from Core metadata. Do not
   hard-code provider prefixes, model lists, seed support, or temperature
   behavior.
+- Exception: provider-specific behavior is allowed only when the maintainer has
+  approved it and Core metadata cannot express it. Document each exception here
+  and in README, keep it in one place, and remove it once Core can express it.
+  Current exceptions:
+  - The Ollama context window control (`ollama_num_ctx`), which Core defines
+    only for Ollama.
+  - The UI opens on Google's first-listed (newest) model by default.
+- Studio relies on Core's documented reasoning vocabulary: `thinking_off`
+  values and the `none` effort that turns reasoning off. For models with effort
+  levels and `thinking_off: "disabled"` but no `none` level, Studio adds `none`
+  to the dropdown and sends it as `use_thinking=False`, never as an effort.
 - The current pinned Core contract has no seed field. Never emulate a seed by
   mutating prompts or claim reproducibility that Core cannot provide.
 
