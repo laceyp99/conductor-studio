@@ -47,6 +47,10 @@ class UnsupportedSchemaError(ManifestError):
     """A newer (or otherwise unsupported) manifest must not be rewritten."""
 
 
+class SessionBusyError(StorageError):
+    """A session is still generating or rendering audio."""
+
+
 class SessionStore:
     """Read and mutate versioned manifests beneath a Studio data root."""
 
@@ -353,9 +357,11 @@ class SessionStore:
             source = self._session_dir(session_id, must_exist=True)
             manifest = self.load(session_id)
             if not manifest.terminal:
-                raise StorageError("active sessions cannot be moved to trash")
+                raise SessionBusyError("active sessions cannot be moved to trash")
             if any(slot.audio.state is AudioState.RENDERING for slot in manifest.slots):
-                raise StorageError("sessions rendering audio cannot be moved to trash")
+                raise SessionBusyError(
+                    "sessions rendering audio cannot be moved to trash"
+                )
             self._ensure_roots()
             destination = self.trash_root / session_id
             self._contained(destination, self.trash_root)
@@ -373,6 +379,7 @@ __all__ = [
     "PREVIOUS_MANIFEST_NAME",
     "ContainmentError",
     "ManifestError",
+    "SessionBusyError",
     "SessionStore",
     "StorageError",
     "UnsupportedSchemaError",

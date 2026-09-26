@@ -14,6 +14,7 @@ from conductor_studio.models import (
 from conductor_studio.storage import (
     ContainmentError,
     ManifestError,
+    SessionBusyError,
     SessionStore,
     StorageError,
 )
@@ -180,7 +181,7 @@ def test_cannot_trash_active_session_or_load_invalid_pair(tmp_path) -> None:
     complete(manifest)
     manifest.slots[2].audio.state = AudioState.RENDERING
     store.save(manifest)
-    with pytest.raises(StorageError, match="rendering audio"):
+    with pytest.raises(SessionBusyError, match="rendering audio"):
         store.move_to_trash(manifest.session_id)
     assert store.load(manifest.session_id).terminal
     (session / "session.json").write_text("bad")

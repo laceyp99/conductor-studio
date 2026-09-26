@@ -18,7 +18,7 @@ from .models import (
     SlotState,
     VariantSlot,
 )
-from .storage import ContainmentError, StorageError
+from .storage import ContainmentError, SessionBusyError, StorageError
 
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_PROMPT = "a rhythmic sad pop piano"
@@ -406,10 +406,12 @@ class StudioController:
 
         try:
             self.service.move_to_trash(session_id)
-        except ActiveSessionError:
+        except (ActiveSessionError, SessionBusyError):
             notice = "This session is still working. Try again when it finishes."
-        except StorageError as error:
-            notice = f"Could not move this session to trash: {error}."
+        except ContainmentError:
+            notice = "This session was already moved or is missing."
+        except StorageError:
+            notice = "Could not move this session to trash."
         else:
             notice = ""
         return replace(_library_view(self.service), notice=notice)

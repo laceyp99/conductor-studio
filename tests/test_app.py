@@ -28,9 +28,15 @@ from conductor_studio.models import (
     FailureInfo,
     MidiState,
     SessionSettings,
+    SlotState,
 )
-from conductor_studio.services import ActiveSessionError
-from conductor_studio.storage import ContainmentError, StorageError
+from conductor_studio.services import ActiveSessionError, StudioService
+from conductor_studio.storage import (
+    ContainmentError,
+    SessionBusyError,
+    SessionStore,
+    StorageError,
+)
 from conductor_studio.variation import create_manifest
 
 
@@ -333,10 +339,9 @@ def test_audio_retry_rejections_explain_the_reason(error, notice):
     [
         (None, ""),
         (ActiveSessionError("busy"), "still working"),
-        (
-            StorageError("sessions rendering audio cannot be moved to trash"),
-            "rendering audio",
-        ),
+        (SessionBusyError("rendering"), "still working"),
+        (ContainmentError("C:/private/path"), "already moved or is missing"),
+        (StorageError("C:/private/path"), "Could not move this session to trash."),
     ],
 )
 def test_trash_reports_refusals_in_the_library_notice(error, notice):
@@ -346,7 +351,29 @@ def test_trash_reports_refusals_in_the_library_notice(error, notice):
         manifest.session_id
     )
     assert notice in view.notice if notice else view.notice == ""
+    assert "private" not in view.notice
     assert service.trashed == ([] if error else [manifest.session_id])
+
+
+def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+    store = SessionStore(tmp_path / "studio")
+    manifest = _retry_manifest()
+    manifest.batch.batch_id = "batch-1"
+    manifest.batch.generation_ids = [f"generation-{i}" for i in range(4)]
+    for i, slot in enumerate(manifest.slots):
+        slot.artifacts.midi = f"core/generations/generation-{i}/loop.mid"
+        slot.midi = MidiState.READY
+        slot.state = SlotState.SUCCEEDED
+    manifest.refresh_status()
+    store.create(manifest)
+    service = StudioService(store=store, credentials=CredentialStore(environment={}))
+    controller = StudioController(service, _Catalog(), object(), object())
+
+    assert controller.trash(manifest.session_id).notice == ""
+    second = controller.trash(manifest.session_id)
+    assert second.notice == "This session was already moved or is missing."
+    assert str(tmp_path) not in second.notice
+    assert store.load(manifest.session_id, in_trash=True).terminal
 
 
 def test_controller_prompt_validation_and_masked_credential_status():
