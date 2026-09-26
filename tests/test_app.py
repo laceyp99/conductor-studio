@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from conductor_studio.app import (
     _CSS,
     AppView,
     StudioController,
+    _audio_retry_callback,
     _card_view,
     _empty_card,
     _ollama_values,
@@ -26,6 +28,14 @@ from conductor_studio.models import (
     FailureInfo,
     MidiState,
     SessionSettings,
+    SlotState,
+)
+from conductor_studio.services import ActiveSessionError, StudioService
+from conductor_studio.storage import (
+    ContainmentError,
+    SessionBusyError,
+    SessionStore,
+    StorageError,
 )
 from conductor_studio.variation import create_manifest
 
@@ -242,6 +252,128 @@ def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
 def test_view_values_has_fixed_batch_output_shape():
     view = AppView(None, tuple(_empty_card(slot) for slot in ("01", "02", "03", "04")))
     assert len(_view_values(view)) == 41
+
+
+class _RetryService:
+    """Retry-only service double; batch generation must never be called."""
+
+    def __init__(self, manifest, error=None, move_error=None):
+        self.manifest, self.error, self.move_error = manifest, error, move_error
+        self.store = SimpleNamespace(load=lambda session_id: self.manifest)
+        self.active_session_id = None
+        self.generation_active = False
+        self.retries = []
+        self.trashed = []
+
+    def retry_audio(self, session_id, slot_id):
+        self.retries.append((session_id, slot_id))
+        if self.error:
+            raise self.error
+        return self.manifest
+
+    def wait(self, session_id):
+        return self.manifest
+
+    def move_to_trash(self, session_id):
+        if self.move_error:
+            raise self.move_error
+        self.trashed.append(session_id)
+
+    def history(self):
+        return []
+
+    def favorites(self):
+        return []
+
+    def create_session(self, settings):
+        pytest.fail("audio retry must not generate a batch")
+
+
+def _retry_manifest():
+    return create_manifest(
+        SessionSettings(prompt="motif", provider="OpenAI", model="test"),
+        core_version="0.5.3",
+    )
+
+
+def test_audio_retry_callback_streams_its_own_slot_without_generation():
+    manifest = _retry_manifest()
+    service = _RetryService(manifest)
+    controller = StudioController(service, _Catalog(), object(), object())
+
+    for slot in ("01", "02", "03", "04"):
+        callback = _audio_retry_callback(controller, slot)
+        assert inspect.isgeneratorfunction(callback)
+        updates = list(callback(manifest.session_id))
+        assert len(updates) == 2
+        assert all(len(update) == 41 for update in updates)
+    assert service.retries == [
+        (manifest.session_id, s) for s in ("01", "02", "03", "04")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "notice"),
+    [
+        (ActiveSessionError("busy"), "Another generation is running"),
+        (ValueError("audio is not in a retryable state"), "needs saved MIDI"),
+        (
+            ContainmentError("artifact is not a regular file"),
+            "saved MIDI file is missing",
+        ),
+        (OSError("disk"), "Check the local audio tools"),
+    ],
+)
+def test_audio_retry_rejections_explain_the_reason(error, notice):
+    manifest = _retry_manifest()
+    controller = StudioController(
+        _RetryService(manifest, error=error), _Catalog(), object(), object()
+    )
+    (view,) = controller.retry_audio(manifest.session_id, "01")
+    assert notice in view.notice
+    assert view.generate_enabled
+
+
+@pytest.mark.parametrize(
+    ("error", "notice"),
+    [
+        (None, ""),
+        (ActiveSessionError("busy"), "still working"),
+        (SessionBusyError("rendering"), "still working"),
+        (ContainmentError("C:/private/path"), "already moved or is missing"),
+        (StorageError("C:/private/path"), "Could not move this session to trash."),
+    ],
+)
+def test_trash_reports_refusals_in_the_library_notice(error, notice):
+    manifest = _retry_manifest()
+    service = _RetryService(manifest, move_error=error)
+    view = StudioController(service, _Catalog(), object(), object()).trash(
+        manifest.session_id
+    )
+    assert notice in view.notice if notice else view.notice == ""
+    assert "private" not in view.notice
+    assert service.trashed == ([] if error else [manifest.session_id])
+
+
+def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+    store = SessionStore(tmp_path / "studio")
+    manifest = _retry_manifest()
+    manifest.batch.batch_id = "batch-1"
+    manifest.batch.generation_ids = [f"generation-{i}" for i in range(4)]
+    for i, slot in enumerate(manifest.slots):
+        slot.artifacts.midi = f"core/generations/generation-{i}/loop.mid"
+        slot.midi = MidiState.READY
+        slot.state = SlotState.SUCCEEDED
+    manifest.refresh_status()
+    store.create(manifest)
+    service = StudioService(store=store, credentials=CredentialStore(environment={}))
+    controller = StudioController(service, _Catalog(), object(), object())
+
+    assert controller.trash(manifest.session_id).notice == ""
+    second = controller.trash(manifest.session_id)
+    assert second.notice == "This session was already moved or is missing."
+    assert str(tmp_path) not in second.notice
+    assert store.load(manifest.session_id, in_trash=True).terminal
 
 
 def test_controller_prompt_validation_and_masked_credential_status():

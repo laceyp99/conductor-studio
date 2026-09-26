@@ -14,6 +14,7 @@ from conductor_studio.models import (
 from conductor_studio.storage import (
     ContainmentError,
     ManifestError,
+    SessionBusyError,
     SessionStore,
     StorageError,
 )
@@ -115,7 +116,10 @@ def test_recovery_interrupts_audio_without_invalidating_completed_midi(
     loaded = store.load(manifest.session_id)
     assert all(slot.state is SlotState.SUCCEEDED for slot in loaded.slots)
     assert loaded.slots[0].audio.state is AudioState.INTERRUPTED
+    assert loaded.slots[0].audio.retryable is True
+    assert loaded.slots[0].audio.failure.category.value == "interrupted"
     assert loaded.batch.failure is None
+    assert store.recover_startup() == []
 
 
 def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:
@@ -174,6 +178,12 @@ def test_cannot_trash_active_session_or_load_invalid_pair(tmp_path) -> None:
     with pytest.raises(StorageError):
         store.move_to_trash(manifest.session_id)
     session = store.session_dir(manifest.session_id)
+    complete(manifest)
+    manifest.slots[2].audio.state = AudioState.RENDERING
+    store.save(manifest)
+    with pytest.raises(SessionBusyError, match="rendering audio"):
+        store.move_to_trash(manifest.session_id)
+    assert store.load(manifest.session_id).terminal
     (session / "session.json").write_text("bad")
     (session / "session.previous.json").write_text("bad")
     with pytest.raises(ManifestError):

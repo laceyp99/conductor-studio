@@ -48,7 +48,7 @@ class FakeAdapter:
             return self.outcome
         items = []
         for i in range(4):
-            midi = self.root / "core" / f"{i}.mid"
+            midi = self.root / "core" / "generations" / f"gen-{i}" / "loop.mid"
             midi.parent.mkdir(parents=True, exist_ok=True)
             midi.write_bytes(b"MThd")
             items.append(
@@ -183,3 +183,93 @@ def test_audio_retry_does_not_call_provider(tmp_path):
     assert adapters[-1].batch_calls == 0
     assert adapters[-1].audio_calls == ["01"]
     assert retried.slot("01").audio.state is AudioState.READY
+
+
+def test_audio_rendering_is_persisted_and_interruption_can_be_retried(tmp_path):
+    service, _ = make_service(tmp_path)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    completed.slot("02").audio = AudioInfo(
+        state=AudioState.FAILED,
+        failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+        retryable=True,
+    )
+    service.store.save(completed)
+
+    gate = threading.Event()
+    rendering = threading.Event()
+    adapters = []
+
+    class PausedAdapter(FakeAdapter):
+        def render_audio(self, manifest, slot_id):
+            rendering.set()
+            super().render_audio(manifest, slot_id)
+
+    def factory(root, credentials):
+        adapter = PausedAdapter(root, credentials, gate=gate)
+        adapters.append(adapter)
+        return adapter
+
+    service.adapter_factory = factory
+    try:
+        service.retry_audio(created.session_id, "02")
+        assert rendering.wait(3)
+        assert (
+            service.store.load(created.session_id).slot("02").audio.state
+            is AudioState.RENDERING
+        )
+    finally:
+        gate.set()
+        service.wait(created.session_id)
+
+    manifest = service.store.load(created.session_id)
+    manifest.slot("02").audio = AudioInfo(state=AudioState.RENDERING)
+    service.store.save(manifest)
+    recovered = SessionStore(service.store.studio_root).recover_startup()
+    assert len(recovered) == 1
+    interrupted = service.store.load(created.session_id).slot("02")
+    assert interrupted.midi is MidiState.READY
+    assert interrupted.audio.state is AudioState.INTERRUPTED
+    assert interrupted.audio.retryable
+
+    service.retry_audio(created.session_id, "02")
+    retried = service.wait(created.session_id)
+    assert retried.slot("02").audio.state is AudioState.READY
+    assert [adapter.batch_calls for adapter in adapters] == [0, 0]
+    assert [adapter.audio_calls for adapter in adapters] == [["02"], ["02"]]
+
+
+def test_session_cannot_be_trashed_while_audio_retry_renders(tmp_path):
+    gate = threading.Event()
+    service, _ = make_service(tmp_path)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    completed.slot("03").audio = AudioInfo(
+        state=AudioState.FAILED,
+        failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+        retryable=True,
+    )
+    service.store.save(completed)
+    service.adapter_factory = lambda root, credentials: FakeAdapter(
+        root, credentials, gate=gate
+    )
+    try:
+        service.retry_audio(created.session_id, "03")
+        with pytest.raises(ActiveSessionError):
+            service.move_to_trash(created.session_id)
+    finally:
+        gate.set()
+        service.wait(created.session_id)
+    assert service.store.load(created.session_id).slot("03").audio.state is (
+        AudioState.READY
+    )
+    assert service.move_to_trash(created.session_id).is_dir()
+
+
+def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
+    service, adapters = make_service(tmp_path)
+    created = service.create_session(settings())
+    service.wait(created.session_id)
+    with pytest.raises(ValueError, match="not in a retryable state"):
+        service.retry_audio(created.session_id, "01")
+    assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]

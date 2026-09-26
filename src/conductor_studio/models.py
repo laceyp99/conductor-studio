@@ -232,11 +232,17 @@ class AudioInfo(BaseModel):
 
     @model_validator(mode="after")
     def _failure(self) -> AudioInfo:
-        failed = self.state in {AudioState.FAILED, AudioState.UNAVAILABLE}
+        failed = self.state in {
+            AudioState.FAILED,
+            AudioState.UNAVAILABLE,
+            AudioState.INTERRUPTED,
+        }
         if failed != (self.failure is not None):
             raise ValueError("audio state and failure must agree")
         if self.retryable and not failed:
-            raise ValueError("only failed audio can be retried")
+            raise ValueError(
+                "only failed, unavailable, or interrupted audio can be retried"
+            )
         return self
 
 
