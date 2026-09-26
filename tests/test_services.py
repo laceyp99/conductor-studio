@@ -237,3 +237,39 @@ def test_audio_rendering_is_persisted_and_interruption_can_be_retried(tmp_path):
     assert retried.slot("02").audio.state is AudioState.READY
     assert [adapter.batch_calls for adapter in adapters] == [0, 0]
     assert [adapter.audio_calls for adapter in adapters] == [["02"], ["02"]]
+
+
+def test_session_cannot_be_trashed_while_audio_retry_renders(tmp_path):
+    gate = threading.Event()
+    service, _ = make_service(tmp_path)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    completed.slot("03").audio = AudioInfo(
+        state=AudioState.FAILED,
+        failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+        retryable=True,
+    )
+    service.store.save(completed)
+    service.adapter_factory = lambda root, credentials: FakeAdapter(
+        root, credentials, gate=gate
+    )
+    try:
+        service.retry_audio(created.session_id, "03")
+        with pytest.raises(ActiveSessionError):
+            service.move_to_trash(created.session_id)
+    finally:
+        gate.set()
+        service.wait(created.session_id)
+    assert service.store.load(created.session_id).slot("03").audio.state is (
+        AudioState.READY
+    )
+    assert service.move_to_trash(created.session_id).is_dir()
+
+
+def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
+    service, adapters = make_service(tmp_path)
+    created = service.create_session(settings())
+    service.wait(created.session_id)
+    with pytest.raises(ValueError, match="not in a retryable state"):
+        service.retry_audio(created.session_id, "01")
+    assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]

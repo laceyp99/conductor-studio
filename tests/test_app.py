@@ -10,6 +10,7 @@ from conductor_studio.app import (
     _CSS,
     AppView,
     StudioController,
+    _audio_retry_callback,
     _card_view,
     _empty_card,
     _ollama_values,
@@ -28,6 +29,8 @@ from conductor_studio.models import (
     MidiState,
     SessionSettings,
 )
+from conductor_studio.services import ActiveSessionError
+from conductor_studio.storage import ContainmentError, StorageError
 from conductor_studio.variation import create_manifest
 
 
@@ -245,58 +248,105 @@ def test_view_values_has_fixed_batch_output_shape():
     assert len(_view_values(view)) == 41
 
 
-def test_registered_audio_retry_events_stream_each_slot_without_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    calls = []
+class _RetryService:
+    """Retry-only service double; batch generation must never be called."""
 
-    def retry_audio(self, session, slot):
-        calls.append((session, slot))
-        view = AppView(
-            session, tuple(_empty_card(item) for item in ("01", "02", "03", "04"))
-        )
-        yield view
-        yield view
+    def __init__(self, manifest, error=None, move_error=None):
+        self.manifest, self.error, self.move_error = manifest, error, move_error
+        self.store = SimpleNamespace(load=lambda session_id: self.manifest)
+        self.active_session_id = None
+        self.generation_active = False
+        self.retries = []
+        self.trashed = []
 
-    monkeypatch.setattr(StudioController, "retry_audio", retry_audio)
+    def retry_audio(self, session_id, slot_id):
+        self.retries.append((session_id, slot_id))
+        if self.error:
+            raise self.error
+        return self.manifest
 
-    class Service:
-        store = SimpleNamespace(studio_root=tmp_path)
-        credentials = CredentialStore(environment={})
+    def wait(self, session_id):
+        return self.manifest
 
-        def history(self):
-            return []
+    def move_to_trash(self, session_id):
+        if self.move_error:
+            raise self.move_error
+        self.trashed.append(session_id)
 
-        def favorites(self):
-            return []
+    def history(self):
+        return []
 
-        def create_session(self, settings):
-            pytest.fail("audio retry must not generate a batch")
+    def favorites(self):
+        return []
 
-    app = create_app(service=Service(), catalog=_Catalog())
-    config = app.get_config_file()
-    components = {component["id"]: component for component in config["components"]}
-    retry_ids = {
-        component_id
-        for component_id, component in components.items()
-        if component.get("type") == "button"
-        and component.get("props", {}).get("value") == "Retry audio"
-    }
-    events = [
-        event
-        for event in config["dependencies"]
-        if any(target[0] in retry_ids for target in event["targets"])
-    ]
-    assert len(events) == 4
-    for event, slot in zip(events, ("01", "02", "03", "04"), strict=True):
-        callback = app.fns[event["id"]].fn
+    def create_session(self, settings):
+        pytest.fail("audio retry must not generate a batch")
+
+
+def _retry_manifest():
+    return create_manifest(
+        SessionSettings(prompt="motif", provider="OpenAI", model="test"),
+        core_version="0.5.3",
+    )
+
+
+def test_audio_retry_callback_streams_its_own_slot_without_generation():
+    manifest = _retry_manifest()
+    service = _RetryService(manifest)
+    controller = StudioController(service, _Catalog(), object(), object())
+
+    for slot in ("01", "02", "03", "04"):
+        callback = _audio_retry_callback(controller, slot)
         assert inspect.isgeneratorfunction(callback)
-        assert len(event["outputs"]) == 41
-        assert app.blocks[event["inputs"][1]].value == slot
-        updates = list(callback("session", slot))
+        updates = list(callback(manifest.session_id))
         assert len(updates) == 2
-        assert all(len(update) == len(event["outputs"]) for update in updates)
-    assert calls == [("session", slot) for slot in ("01", "02", "03", "04")]
+        assert all(len(update) == 41 for update in updates)
+    assert service.retries == [
+        (manifest.session_id, s) for s in ("01", "02", "03", "04")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "notice"),
+    [
+        (ActiveSessionError("busy"), "Another generation is running"),
+        (ValueError("audio is not in a retryable state"), "needs saved MIDI"),
+        (
+            ContainmentError("artifact is not a regular file"),
+            "saved MIDI file is missing",
+        ),
+        (OSError("disk"), "Check the local audio tools"),
+    ],
+)
+def test_audio_retry_rejections_explain_the_reason(error, notice):
+    manifest = _retry_manifest()
+    controller = StudioController(
+        _RetryService(manifest, error=error), _Catalog(), object(), object()
+    )
+    (view,) = controller.retry_audio(manifest.session_id, "01")
+    assert notice in view.notice
+    assert view.generate_enabled
+
+
+@pytest.mark.parametrize(
+    ("error", "notice"),
+    [
+        (None, ""),
+        (ActiveSessionError("busy"), "still working"),
+        (
+            StorageError("sessions rendering audio cannot be moved to trash"),
+            "rendering audio",
+        ),
+    ],
+)
+def test_trash_reports_refusals_in_the_library_notice(error, notice):
+    manifest = _retry_manifest()
+    service = _RetryService(manifest, move_error=error)
+    view = StudioController(service, _Catalog(), object(), object()).trash(
+        manifest.session_id
+    )
+    assert notice in view.notice if notice else view.notice == ""
+    assert service.trashed == ([] if error else [manifest.session_id])
 
 
 def test_controller_prompt_validation_and_masked_credential_status():

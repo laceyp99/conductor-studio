@@ -354,6 +354,8 @@ class SessionStore:
             manifest = self.load(session_id)
             if not manifest.terminal:
                 raise StorageError("active sessions cannot be moved to trash")
+            if any(slot.audio.state is AudioState.RENDERING for slot in manifest.slots):
+                raise StorageError("sessions rendering audio cannot be moved to trash")
             self._ensure_roots()
             destination = self.trash_root / session_id
             self._contained(destination, self.trash_root)

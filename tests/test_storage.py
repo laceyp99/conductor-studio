@@ -177,6 +177,12 @@ def test_cannot_trash_active_session_or_load_invalid_pair(tmp_path) -> None:
     with pytest.raises(StorageError):
         store.move_to_trash(manifest.session_id)
     session = store.session_dir(manifest.session_id)
+    complete(manifest)
+    manifest.slots[2].audio.state = AudioState.RENDERING
+    store.save(manifest)
+    with pytest.raises(StorageError, match="rendering audio"):
+        store.move_to_trash(manifest.session_id)
+    assert store.load(manifest.session_id).terminal
     (session / "session.json").write_text("bad")
     (session / "session.previous.json").write_text("bad")
     with pytest.raises(ManifestError):

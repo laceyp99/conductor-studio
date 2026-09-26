@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from .models import (
     SlotState,
     VariantSlot,
 )
+from .storage import ContainmentError, StorageError
 
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_PROMPT = "a rhythmic sad pop piano"
@@ -237,6 +238,18 @@ def _library_view(service: Any) -> LibraryView:
     return LibraryView(history, favorites)
 
 
+def _audio_retry_notice(error: Exception) -> str:
+    from .services import ActiveSessionError
+
+    if isinstance(error, ActiveSessionError):
+        return "Another generation is running. Retry audio when it finishes."
+    if isinstance(error, ValueError):
+        return "Audio retry needs saved MIDI and a failed or interrupted render."
+    if isinstance(error, ContainmentError):
+        return "The saved MIDI file is missing, so audio cannot be retried."
+    return "Audio retry could not start. Check the local audio tools."
+
+
 class StudioController:
     def __init__(
         self, service: Any, catalog: Any, credentials: Any, publisher: MediaPublisher
@@ -366,11 +379,11 @@ class StudioController:
             yield from self._stream_session(
                 session_id, self.service.retry_audio(session_id, slot_id)
             )
-        except Exception:
+        except Exception as error:
             yield self._view(
                 self.service.store.load(session_id),
-                enabled=True,
-                notice="Audio retry could not start. Check the local audio tools.",
+                enabled=not self.service.generation_active,
+                notice=_audio_retry_notice(error),
             )
 
     def toggle_favorite(self, session_id: str, slot_id: str) -> AppView:
@@ -389,8 +402,17 @@ class StudioController:
         return _library_view(self.service)
 
     def trash(self, session_id: str) -> LibraryView:
-        self.service.move_to_trash(session_id)
-        return _library_view(self.service)
+        from .services import ActiveSessionError
+
+        try:
+            self.service.move_to_trash(session_id)
+        except ActiveSessionError:
+            notice = "This session is still working. Try again when it finishes."
+        except StorageError as error:
+            notice = f"Could not move this session to trash: {error}."
+        else:
+            notice = ""
+        return replace(_library_view(self.service), notice=notice)
 
     def credentials_view(self) -> CredentialView:
         from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
@@ -573,6 +595,17 @@ def _view_values(view: AppView) -> list[Any]:
         _update(view.batch_error, visible=bool(view.batch_error)),
         _update(interactive=view.generate_enabled),
     ]
+
+
+def _audio_retry_callback(
+    controller: StudioController, slot_id: str
+) -> Callable[[str], Iterator[list[Any]]]:
+    # Gradio streams only when the callback itself is a generator function.
+    def retry(session_id: str) -> Iterator[list[Any]]:
+        for view in controller.retry_audio(session_id, slot_id):
+            yield _view_values(view)
+
+    return retry
 
 
 def _library_values(view: LibraryView) -> tuple[Any, Any, str]:
@@ -855,10 +888,6 @@ def create_app(
             for view in controller.generate(*values):
                 yield _view_values(view)
 
-        def retry_audio_event(session: str, slot: str) -> Iterator[list[Any]]:
-            for view in controller.retry_audio(session, slot):
-                yield _view_values(view)
-
         generation_inputs = [
             prompt,
             key,
@@ -898,8 +927,8 @@ def create_app(
                 api_visibility="private",
             )
             cards[index]["audio_retry"].click(
-                retry_audio_event,
-                [active_session, gr.State(slot_id)],
+                _audio_retry_callback(controller, slot_id),
+                active_session,
                 app_outputs,
                 concurrency_limit=1,
                 concurrency_id="generation",
