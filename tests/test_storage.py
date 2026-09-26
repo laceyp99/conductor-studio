@@ -115,7 +115,10 @@ def test_recovery_interrupts_audio_without_invalidating_completed_midi(
     loaded = store.load(manifest.session_id)
     assert all(slot.state is SlotState.SUCCEEDED for slot in loaded.slots)
     assert loaded.slots[0].audio.state is AudioState.INTERRUPTED
+    assert loaded.slots[0].audio.retryable is True
+    assert loaded.slots[0].audio.failure.category.value == "interrupted"
     assert loaded.batch.failure is None
+    assert store.recover_startup() == []
 
 
 def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:

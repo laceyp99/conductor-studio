@@ -189,3 +189,16 @@ def test_audio_failure_is_card_local():
         retryable=True,
     )
     assert SessionManifest.model_validate(value.model_dump()).terminal
+
+
+def test_interrupted_audio_requires_failure_and_can_be_retryable():
+    interrupted = AudioInfo(
+        state=AudioState.INTERRUPTED,
+        failure=FailureInfo(
+            category=ErrorCategory.INTERRUPTED, message="Audio rendering stopped."
+        ),
+        retryable=True,
+    )
+    assert AudioInfo.model_validate(interrupted.model_dump()) == interrupted
+    with pytest.raises(ValidationError, match="audio state and failure"):
+        AudioInfo(state=AudioState.INTERRUPTED, retryable=True)

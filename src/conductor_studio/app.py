@@ -855,6 +855,10 @@ def create_app(
             for view in controller.generate(*values):
                 yield _view_values(view)
 
+        def retry_audio_event(session: str, slot: str) -> Iterator[list[Any]]:
+            for view in controller.retry_audio(session, slot):
+                yield _view_values(view)
+
         generation_inputs = [
             prompt,
             key,
@@ -894,10 +898,8 @@ def create_app(
                 api_visibility="private",
             )
             cards[index]["audio_retry"].click(
-                lambda session, slot=slot_id: (
-                    _view_values(view) for view in controller.retry_audio(session, slot)
-                ),
-                active_session,
+                retry_audio_event,
+                [active_session, gr.State(slot_id)],
                 app_outputs,
                 concurrency_limit=1,
                 concurrency_id="generation",

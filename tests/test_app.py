@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -242,6 +243,60 @@ def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
 def test_view_values_has_fixed_batch_output_shape():
     view = AppView(None, tuple(_empty_card(slot) for slot in ("01", "02", "03", "04")))
     assert len(_view_values(view)) == 41
+
+
+def test_registered_audio_retry_events_stream_each_slot_without_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    calls = []
+
+    def retry_audio(self, session, slot):
+        calls.append((session, slot))
+        view = AppView(
+            session, tuple(_empty_card(item) for item in ("01", "02", "03", "04"))
+        )
+        yield view
+        yield view
+
+    monkeypatch.setattr(StudioController, "retry_audio", retry_audio)
+
+    class Service:
+        store = SimpleNamespace(studio_root=tmp_path)
+        credentials = CredentialStore(environment={})
+
+        def history(self):
+            return []
+
+        def favorites(self):
+            return []
+
+        def create_session(self, settings):
+            pytest.fail("audio retry must not generate a batch")
+
+    app = create_app(service=Service(), catalog=_Catalog())
+    config = app.get_config_file()
+    components = {component["id"]: component for component in config["components"]}
+    retry_ids = {
+        component_id
+        for component_id, component in components.items()
+        if component.get("type") == "button"
+        and component.get("props", {}).get("value") == "Retry audio"
+    }
+    events = [
+        event
+        for event in config["dependencies"]
+        if any(target[0] in retry_ids for target in event["targets"])
+    ]
+    assert len(events) == 4
+    for event, slot in zip(events, ("01", "02", "03", "04"), strict=True):
+        callback = app.fns[event["id"]].fn
+        assert inspect.isgeneratorfunction(callback)
+        assert len(event["outputs"]) == 41
+        assert app.blocks[event["inputs"][1]].value == slot
+        updates = list(callback("session", slot))
+        assert len(updates) == 2
+        assert all(len(update) == len(event["outputs"]) for update in updates)
+    assert calls == [("session", slot) for slot in ("01", "02", "03", "04")]
 
 
 def test_controller_prompt_validation_and_masked_credential_status():

@@ -21,6 +21,7 @@ from .models import (
     AudioState,
     ErrorCategory,
     FailureInfo,
+    MidiState,
     SessionManifest,
     SlotState,
 )
@@ -302,6 +303,11 @@ class SessionStore:
                         slot.state = SlotState.INTERRUPTED
                     if slot.audio.state is AudioState.RENDERING:
                         slot.audio.state = AudioState.INTERRUPTED
+                        slot.audio.failure = FailureInfo(
+                            category=ErrorCategory.INTERRUPTED,
+                            message="Audio rendering was interrupted. MIDI is still available.",
+                        )
+                        slot.audio.retryable = slot.midi is MidiState.READY
                 if batch_active:
                     current.batch.failure = FailureInfo(
                         category=ErrorCategory.INTERRUPTED,

@@ -238,7 +238,17 @@ class StudioService:
             self.store.save(SessionManifest.model_validate(data))
 
     def _audio(self, session_id, slot_id, adapter):
-        local = self.store.load(session_id).model_copy(deep=True)
+        with self._coordinator_lock:
+            current = self.store.load(session_id)
+            data = current.model_dump(mode="python")
+            target = data["slots"][int(slot_id) - 1]
+            target["audio"] = AudioInfo(state=AudioState.RENDERING).model_dump(
+                mode="python"
+            )
+            target["artifacts"]["audio"] = None
+            local = self.store.save(SessionManifest.model_validate(data))
+        self._emit(local)
+        local = local.model_copy(deep=True)
         try:
             adapter.render_audio(local, slot_id)
         except Exception:
@@ -352,8 +362,16 @@ class StudioService:
 
     def retry_audio(self, session_id, slot_id):
         manifest = self.store.load(session_id)
-        if manifest.slot(slot_id).midi is not MidiState.READY:
+        slot = manifest.slot(slot_id)
+        if (
+            slot.midi is not MidiState.READY
+            or not slot.artifacts.midi
+            or not slot.audio.retryable
+            or slot.audio.state
+            not in {AudioState.FAILED, AudioState.UNAVAILABLE, AudioState.INTERRUPTED}
+        ):
             raise ValueError("audio retry requires a valid persisted MIDI artifact")
+        self.store.artifact_path(session_id, slot.artifacts.midi)
         with self._state_lock:
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
