@@ -10,11 +10,6 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Providers whose thinking toggle leaves temperature unchanged.  Core forwards
-# the requested temperature alongside Ollama's ``think`` flag, so the cloud
-# "thinking forces temperature 1.0" rule does not apply there.
-INDEPENDENT_THINKING_PROVIDERS = frozenset({"Ollama"})
-
 
 class _ValueEnum(str, Enum):
     def __str__(self) -> str:
@@ -76,7 +71,12 @@ def _as_utc(value: datetime) -> datetime:
 
 
 class SessionSettings(BaseModel):
-    """Immutable controls for the one Core batch request."""
+    """Immutable controls for the one Core batch request.
+
+    ``effective_temperature`` is the temperature Core sends, which differs from
+    the requested one only when the model reports a thinking-fixed temperature.
+    Both are ``None`` for models that reject a caller-selected temperature.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     prompt: str
@@ -88,6 +88,7 @@ class SessionSettings(BaseModel):
     effective_temperature: float | None = Field(default=0.7, ge=0, le=2)
     extended_thinking: bool = False
     effort: str | None = None
+    ollama_num_ctx: int | None = Field(default=None, gt=0, strict=True)
 
     @field_validator("prompt")
     @classmethod
@@ -118,17 +119,14 @@ class SessionSettings(BaseModel):
             raise ValueError(
                 "requested and effective temperature must both be set or omitted"
             )
-        if self.effort is not None and self.requested_temperature is not None:
-            raise ValueError("effort and temperature are mutually exclusive")
         if self.effort is not None and not self.extended_thinking:
             raise ValueError("effort requires extended thinking")
-        if (
-            self.extended_thinking
-            and self.effort is None
-            and self.provider not in INDEPENDENT_THINKING_PROVIDERS
-            and self.effective_temperature != 1.0
+        if self.ollama_num_ctx is not None and self.provider != "Ollama":
+            raise ValueError("ollama_num_ctx applies only to Ollama models")
+        if not self.extended_thinking and (
+            self.requested_temperature != self.effective_temperature
         ):
-            raise ValueError("extended thinking requires effective temperature 1.0")
+            raise ValueError("temperature can differ only while thinking is enabled")
         return self
 
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .catalog import DEFAULT_PROVIDER
 from .media import MediaPublisher
 from .models import (
     AudioState,
@@ -19,9 +20,15 @@ from .models import (
 )
 
 DEFAULT_TEMPERATURE = 0.7
-# Modes where temperature stays user-controlled; thinking_toggle is Ollama's
-# thinking switch, which does not lock temperature.
-_FREE_TEMPERATURE_MODES = frozenset({"temperature", "thinking_toggle"})
+DEFAULT_PROMPT = "a rhythmic sad pop piano"
+# Ollama context window presets.  The default sends no ``num_ctx`` so the
+# server's own setting (OLLAMA_CONTEXT_LENGTH or the Modelfile) applies.
+OLLAMA_DEFAULT_CONTEXT = "default"
+CONTEXT_WINDOW_PRESETS = (1024, 4096, 16384, 65536, 262144)
+CONTEXT_WINDOW_CHOICES = (
+    ("Ollama default", OLLAMA_DEFAULT_CONTEXT),
+    *((f"{size:,}", str(size)) for size in CONTEXT_WINDOW_PRESETS),
+)
 _UNSET = object()
 _CSS = """
 :root { --studio-ink:#10141d; --studio-panel:#171d29; --studio-line:#344156; }
@@ -85,6 +92,7 @@ class ControlView:
     effort_value: str | None
     effort_visible: bool
     notice: str = ""
+    context_visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,18 +118,28 @@ def _empty_card(slot_id: str) -> CardView:
 
 def _slot_metadata(manifest: SessionManifest) -> str:
     settings = manifest.settings
-    control = (
-        f"effort {settings.effort}"
-        if settings.effort
-        else (
-            f"temperature {settings.effective_temperature:g}"
-            if settings.effective_temperature is not None
-            else "temperature unavailable"
-        )
+    controls = []
+    if settings.effort:
+        controls.append(f"effort {settings.effort}")
+    elif settings.extended_thinking:
+        controls.append("thinking")
+    if settings.effective_temperature is not None:
+        controls.append(f"temperature {settings.effective_temperature:g}")
+    if settings.ollama_num_ctx is not None:
+        controls.append(f"context {settings.ollama_num_ctx:,}")
+    return " · ".join(
+        [settings.provider, settings.model, *(controls or ["model defaults"])]
     )
-    if settings.extended_thinking and not settings.effort:
-        control += " · thinking"
-    return f"{settings.provider} · {settings.model} · {control}"
+
+
+def _context_window(value: Any) -> int | None:
+    """Map a context preset to ``num_ctx``; the default preset sends none."""
+    if value in (None, "", OLLAMA_DEFAULT_CONTEXT):
+        return None
+    for size in CONTEXT_WINDOW_PRESETS:
+        if value == str(size):
+            return size
+    raise ValueError(f"unknown context window preset: {value!r}")
 
 
 def _card_view(
@@ -246,7 +264,7 @@ class StudioController:
         return (
             None
             if isinstance(prompt, str) and prompt.strip()
-            else "Enter a prompt before generating."
+            else "Enter a description before generating."
         )
 
     def _settings(
@@ -260,34 +278,15 @@ class StudioController:
         requested_temperature: float,
         thinking: bool,
         effort: str | None,
+        context_window: Any = None,
     ) -> SessionSettings:
-        mode = self.catalog.lookup(provider, model).control_mode
-        if mode == "effort":
-            return SessionSettings(
-                prompt=prompt,
-                key=key,
-                scale=scale,
-                provider=provider,
-                model=model,
-                requested_temperature=None,
-                effective_temperature=None,
-                extended_thinking=True,
-                effort=effort,
-            )
-        if mode == "thinking_toggle":
-            return SessionSettings(
-                prompt=prompt,
-                key=key,
-                scale=scale,
-                provider=provider,
-                model=model,
-                requested_temperature=temperature,
-                effective_temperature=temperature,
-                extended_thinking=thinking,
-            )
+        capability = self.catalog.lookup(provider, model)
+        thinking, effort = capability.reasoning(thinking, effort)
+        # The slider holds the user's choice unless it shows a fixed thinking
+        # temperature; the requested state keeps the choice in that case.
         requested = (
             requested_temperature
-            if mode == "legacy_thinking" and thinking
+            if _fixes_temperature(capability, thinking)
             else temperature
         )
         return SessionSettings(
@@ -296,11 +295,15 @@ class StudioController:
             scale=scale,
             provider=provider,
             model=model,
-            requested_temperature=requested,
-            effective_temperature=1.0
-            if mode == "legacy_thinking" and thinking
-            else temperature,
-            extended_thinking=mode == "legacy_thinking" and thinking,
+            requested_temperature=requested
+            if capability.temperature_supported
+            else None,
+            effective_temperature=capability.effective_temperature(requested, thinking),
+            extended_thinking=thinking,
+            effort=effort,
+            ollama_num_ctx=_context_window(context_window)
+            if provider == "Ollama"
+            else None,
         )
 
     def _stream_session(
@@ -327,6 +330,7 @@ class StudioController:
         requested_temperature: float,
         thinking: bool,
         effort: str | None,
+        context_window: Any = None,
     ) -> Iterator[AppView]:
         if error := self.validate_prompt(prompt):
             yield AppView(
@@ -345,6 +349,7 @@ class StudioController:
                     requested_temperature,
                     thinking,
                     effort,
+                    context_window,
                 )
             )
             yield from self._stream_session(manifest.session_id, manifest)
@@ -437,11 +442,16 @@ class StudioController:
         model: str | None = None,
         *,
         previous_mode: str | None = None,
-        temperature: float = DEFAULT_TEMPERATURE,
         requested_temperature: float = DEFAULT_TEMPERATURE,
         thinking: bool = False,
         effort: str | None = None,
     ) -> ControlView:
+        """Derive controls from Core metadata for the selected model.
+
+        ``requested_temperature`` is the user's last freely chosen value; it is
+        kept across models and shown unless the model fixes the temperature
+        while thinking.
+        """
         capabilities = tuple(self.catalog.models(provider))
         choices = tuple(item.model for item in capabilities)
         selected = model if model in choices else (choices[0] if choices else None)
@@ -463,40 +473,37 @@ class StudioController:
                 None,
                 False,
             )
-        mode, efforts = capability.control_mode, tuple(capability.effort_options)
-        selected_effort = (
-            effort
-            if previous_mode == "effort" and effort in efforts
-            else (efforts[0] if efforts else None)
-        )
-        if mode == "effort":
-            temperature = requested_temperature = DEFAULT_TEMPERATURE
-            thinking = False
-        elif mode in _FREE_TEMPERATURE_MODES:
-            if previous_mode not in _FREE_TEMPERATURE_MODES:
-                temperature = requested_temperature = DEFAULT_TEMPERATURE
-            thinking = thinking and previous_mode == mode == "thinking_toggle"
-        else:
-            thinking = thinking if previous_mode == "legacy_thinking" else False
-            if previous_mode in _FREE_TEMPERATURE_MODES:
-                requested_temperature = temperature
-            elif previous_mode != "legacy_thinking":
-                requested_temperature = DEFAULT_TEMPERATURE
-            temperature = 1.0 if thinking else requested_temperature
+        mode, efforts = capability.control_mode, tuple(capability.effort_choices)
+        # The toggle state carries over only between models that offer it; an
+        # effort carries over when the new model offers the same level.
+        thinking = thinking and previous_mode == mode == "thinking"
+        effort = effort if effort in efforts else (efforts[0] if efforts else None)
+        locked = _temperature_locked(capability, thinking, effort)
         return ControlView(
             choices,
             selected,
             mode,
-            temperature,
+            capability.thinking_fixed_temperature if locked else requested_temperature,
             requested_temperature,
-            mode != "effort",
-            mode != "legacy_thinking" or not thinking,
-            mode in {"legacy_thinking", "thinking_toggle"},
+            capability.temperature_supported,
+            not locked,
+            mode == "thinking",
             thinking,
             efforts,
-            selected_effort,
+            effort,
             mode == "effort",
+            context_visible=provider == "Ollama",
         )
+
+    def temperature_locked(
+        self, provider: str, model: str, thinking: bool, effort: str | None = None
+    ) -> bool:
+        """Whether the slider shows a fixed thinking temperature, not a choice."""
+        try:
+            capability = self.catalog.lookup(provider, model)
+        except Exception:
+            return False
+        return _temperature_locked(capability, thinking, effort)
 
     def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
         # Discover models on the same host generation will use: a typed host
@@ -511,6 +518,23 @@ class StudioController:
             if readiness.available
             else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
         )
+
+
+def _temperature_locked(capability: Any, thinking: bool, effort: str | None) -> bool:
+    """Whether the UI choice makes Core send the model's fixed temperature."""
+    try:
+        use_thinking, _ = capability.reasoning(thinking, effort)
+    except ValueError:  # a level left over from the previous model
+        return False
+    return _fixes_temperature(capability, use_thinking)
+
+
+def _fixes_temperature(capability: Any, use_thinking: bool) -> bool:
+    return (
+        use_thinking
+        and capability.temperature_supported
+        and capability.thinking_fixed_temperature is not None
+    )
 
 
 def _update(value: Any = _UNSET, **kwargs: Any) -> Any:
@@ -575,6 +599,7 @@ def _control_values(view: ControlView) -> tuple[Any, ...]:
             visible=view.effort_visible,
         ),
         view.mode,
+        _update(visible=view.context_visible),
     )
 
 
@@ -651,7 +676,11 @@ def create_app(
         MediaPublisher(Path(service.store.studio_root) / "served"),
     )
     providers = tuple(catalog.providers())
-    provider_value = providers[0] if providers else None
+    provider_value = (
+        DEFAULT_PROVIDER
+        if DEFAULT_PROVIDER in providers
+        else (providers[0] if providers else None)
+    )
     controls = (
         controller.control_view(provider_value)
         if provider_value
@@ -679,15 +708,13 @@ def create_app(
             active_session = gr.State(None)
             control_mode = gr.State(controls.mode)
             requested_temperature = gr.State(controls.requested_temperature)
-            with gr.Tabs(selected="generate"):
-                with gr.Tab("Generate", id="generate"):
-                    with gr.Row():
-                        prompt = gr.Textbox(
-                            label="Prompt",
-                            lines=3,
-                            placeholder="A warm four-bar synth motif...",
-                        )
-                        with gr.Column():
+            with gr.Tabs(selected="generate") as tabs:
+                with gr.Tab("Generate", id="generate") as generate_tab:
+                    # Musical loop parameters on the left, generation
+                    # parameters on the right, side by side.
+                    with gr.Row(elem_id="generation-controls"):
+                        with gr.Column(scale=1, elem_id="loop-controls"):
+                            gr.Markdown("## Loop Parameters")
                             key = gr.Dropdown(
                                 [
                                     "C",
@@ -709,49 +736,66 @@ def create_app(
                             scale = gr.Dropdown(
                                 ["Major", "Minor"], value="Major", label="Scale"
                             )
-                    with gr.Row():
-                        provider = gr.Dropdown(
-                            providers, value=provider_value, label="Provider"
-                        )
-                        model = gr.Dropdown(
-                            controls.model_choices,
-                            value=controls.model_value,
-                            label="Model",
-                        )
-                        temperature = gr.Slider(
-                            0.0,
-                            2.0,
-                            value=controls.temperature_value,
-                            step=0.1,
-                            label="Temperature",
-                            visible=controls.temperature_visible,
-                            interactive=controls.temperature_interactive,
-                        )
-                        thinking = gr.Checkbox(
-                            value=controls.thinking_value,
-                            visible=controls.thinking_visible,
-                            label="Extended thinking",
-                            info="Reasoning",
-                            elem_classes=["thinking-toggle"],
-                        )
-                        effort = gr.Dropdown(
-                            controls.effort_choices,
-                            value=controls.effort_value,
-                            visible=controls.effort_visible,
-                            label="Reasoning effort",
-                        )
-                    generate = gr.Button("Generate four variations", variant="primary")
+                            prompt = gr.Textbox(
+                                value=DEFAULT_PROMPT,
+                                label="Description",
+                                lines=1,
+                                placeholder="A warm four-bar synth motif...",
+                            )
+                        with gr.Column(scale=1, elem_id="model-controls"):
+                            gr.Markdown("## Generation Parameters")
+                            provider = gr.Dropdown(
+                                providers, value=provider_value, label="Provider"
+                            )
+                            model = gr.Dropdown(
+                                controls.model_choices,
+                                value=controls.model_value,
+                                label="Model",
+                            )
+                            temperature = gr.Slider(
+                                0.0,
+                                2.0,
+                                value=controls.temperature_value,
+                                step=0.1,
+                                label="Temperature",
+                                visible=controls.temperature_visible,
+                                interactive=controls.temperature_interactive,
+                            )
+                            thinking = gr.Checkbox(
+                                value=controls.thinking_value,
+                                visible=controls.thinking_visible,
+                                label="Extended thinking",
+                                info="Reasoning",
+                                elem_classes=["thinking-toggle"],
+                            )
+                            effort = gr.Dropdown(
+                                controls.effort_choices,
+                                value=controls.effort_value,
+                                visible=controls.effort_visible,
+                                label="Reasoning effort",
+                            )
+                            with gr.Accordion(
+                                "Advanced Settings",
+                                open=False,
+                                visible=controls.context_visible,
+                            ) as advanced_settings:
+                                context_window = gr.Dropdown(
+                                    list(CONTEXT_WINDOW_CHOICES),
+                                    value=OLLAMA_DEFAULT_CONTEXT,
+                                    label="Ollama Context Size",
+                                )
+                    generate = gr.Button("Generate Variations", variant="primary")
                     notice = gr.Markdown()
-                with gr.Tab("History", id="history"):
+                with gr.Tab("History", id="history") as history_tab:
                     history_choice = gr.Dropdown(label="Saved sessions", choices=())
                     with gr.Row():
                         open_history = gr.Button("Open session")
                         trash = gr.Button("Move to trash", variant="stop")
                     history_notice = gr.Markdown()
-                with gr.Tab("Favorites", id="favorites"):
+                with gr.Tab("Favorites", id="favorites") as favorites_tab:
                     favorite_choice = gr.Dropdown(label="Favorite variants", choices=())
                     open_favorite = gr.Button("Open favorite")
-                with gr.Tab("Settings", id="settings"):
+                with gr.Tab("Settings", id="settings") as settings_tab:
                     gr.Markdown(
                         "Credentials stay in process memory and are never written to session manifests."
                     )
@@ -772,13 +816,16 @@ def create_app(
                     gr.Markdown(controller.audio_status())
                     ollama_notice = gr.Markdown()
 
-            # One shared result surface remains visible while navigating among
-            # Generate, History, and Favorites. Reopen events update this same
-            # read-only batch presentation instead of hidden tab-local output.
-            with gr.Row(elem_id="variant-grid"):
-                cards = [_build_card(gr, slot) for slot in VariantSlot.SLOT_IDS]
-            accounting = gr.Markdown("Cost unavailable", elem_classes=["accounting"])
-            batch_error = gr.Markdown(visible=False, elem_classes=["batch-error"])
+            # One shared result surface is shown under Generate and History and
+            # hidden elsewhere. Reopen events update this same read-only batch
+            # presentation instead of hidden tab-local output.
+            with gr.Column(elem_id="results") as results:
+                with gr.Row(elem_id="variant-grid"):
+                    cards = [_build_card(gr, slot) for slot in VariantSlot.SLOT_IDS]
+                accounting = gr.Markdown(
+                    "Cost unavailable", elem_classes=["accounting"]
+                )
+                batch_error = gr.Markdown(visible=False, elem_classes=["batch-error"])
 
         card_outputs = [
             card[name]
@@ -818,6 +865,7 @@ def create_app(
             requested_temperature,
             thinking,
             effort,
+            context_window,
         ]
         generate.click(
             generate_event,
@@ -860,7 +908,6 @@ def create_app(
             provider,
             model,
             control_mode,
-            temperature,
             requested_temperature,
             thinking,
             effort,
@@ -872,13 +919,13 @@ def create_app(
             thinking,
             effort,
             control_mode,
+            advanced_settings,
         ]
 
-        def controls_event(
+        def current_controls(
             selected_provider: str,
             selected_model: str | None,
             previous: str,
-            temp: float,
             requested: float,
             think: bool,
             selected_effort: str | None,
@@ -888,7 +935,6 @@ def create_app(
                     selected_provider,
                     selected_model,
                     previous_mode=previous,
-                    temperature=temp,
                     requested_temperature=requested,
                     thinking=think,
                     effort=selected_effort,
@@ -896,29 +942,33 @@ def create_app(
             )
 
         provider.change(
-            controls_event, control_inputs, control_outputs, api_visibility="private"
+            current_controls, control_inputs, control_outputs, api_visibility="private"
         )
         model.change(
-            controls_event, control_inputs, control_outputs, api_visibility="private"
+            current_controls, control_inputs, control_outputs, api_visibility="private"
         )
-        thinking.change(
-            lambda enabled, requested, mode: (
-                (gr.skip(), gr.skip())
-                if mode != "legacy_thinking"
-                else (
-                    _update(1.0 if enabled else requested, interactive=not enabled),
-                    requested,
-                )
-            ),
-            [thinking, requested_temperature, control_mode],
-            [temperature, requested_temperature],
-            api_visibility="private",
-        )
+
+        def reasoning_temperature(*values: Any) -> Any:
+            # Turning thinking on, or choosing an effort other than ``none``,
+            # can lock temperature to the model's fixed value.
+            return current_controls(*values)[1]
+
+        for reasoning_control in (thinking, effort):
+            reasoning_control.change(
+                reasoning_temperature,
+                control_inputs,
+                temperature,
+                api_visibility="private",
+            )
         temperature.change(
-            lambda value, mode, enabled: (
-                value if mode != "legacy_thinking" or not enabled else gr.skip()
+            lambda value, selected_provider, selected_model, enabled, level: (
+                gr.skip()
+                if controller.temperature_locked(
+                    selected_provider, selected_model, enabled, level
+                )
+                else value
             ),
-            [temperature, control_mode, thinking],
+            [temperature, provider, model, thinking, effort],
             requested_temperature,
             api_visibility="private",
         )
@@ -935,20 +985,34 @@ def create_app(
             app_outputs,
             api_visibility="private",
         )
+        # Favorites has no result surface of its own: an opened favorite is
+        # shown under Generate, and an empty choice leaves the tab unchanged.
         open_favorite.click(
             lambda selected: (
-                _view_values(controller.reopen(selected.split("|", 1)[0]))
+                [
+                    *_view_values(controller.reopen(selected.split("|", 1)[0])),
+                    gr.Tabs(selected="generate"),
+                    _update(visible=True),
+                ]
                 if selected
-                else _view_values(
-                    AppView(
-                        None, tuple(_empty_card(slot) for slot in VariantSlot.SLOT_IDS)
-                    )
-                )
+                else [_skip()] * (len(app_outputs) + 2)
             ),
             favorite_choice,
-            app_outputs,
+            [*app_outputs, tabs, results],
             api_visibility="private",
         )
+        for tab, shows_results in (
+            (generate_tab, True),
+            (history_tab, True),
+            (favorites_tab, False),
+            (settings_tab, False),
+        ):
+            tab.select(
+                lambda visible=shows_results: _update(visible=visible),
+                None,
+                results,
+                api_visibility="private",
+            )
         trash.click(
             lambda selected: _library_values(controller.trash(selected)),
             history_choice,
@@ -1022,7 +1086,7 @@ def _ollama_values(
     else:
         selected = providers[0] if providers else None
         controls = controller.control_view(selected) if selected else None
-    control_values = _control_values(controls) if controls else (_skip(),) * 6
+    control_values = _control_values(controls) if controls else (_skip(),) * 7
     return (
         _update(choices=list(providers), value=selected),
         *control_values,

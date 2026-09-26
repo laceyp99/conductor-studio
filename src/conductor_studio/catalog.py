@@ -14,6 +14,15 @@ CORE_CLOUD_PROVIDERS = ("OpenAI", "Google", "Anthropic")
 OLLAMA_PROVIDER = "Ollama"
 DEFAULT_OLLAMA_TIMEOUT = 2.0
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# Core's vocabulary for what ``use_thinking=False`` sends.
+THINKING_OFF_DISABLED = "disabled"
+THINKING_OFF_LOWEST_EFFORT = "lowest_effort"
+_THINKING_OFF_MODES = (THINKING_OFF_DISABLED, THINKING_OFF_LOWEST_EFFORT)
+# Core documents a ``none`` effort as a provider's official no-reasoning level.
+NO_REASONING_EFFORT = "none"
+MAX_TEMPERATURE = 2.0
+# Preferred initial provider; its first model is Core's newest listing.
+DEFAULT_PROVIDER = "Google"
 
 
 class CatalogError(ValueError):
@@ -35,6 +44,8 @@ class ModelCapability:
     temperature_supported: bool
     control_mode: str
     rpm: int | None
+    thinking_off: str | None = None
+    thinking_fixed_temperature: float | None = None
     available: bool = True
     readiness: str = "ready"
     error: str | None = None
@@ -50,6 +61,50 @@ class ModelCapability:
     @property
     def supports_temperature(self) -> bool:
         return self.temperature_supported
+
+    @property
+    def adds_no_reasoning_effort(self) -> bool:
+        """Whether Studio offers ``none`` for a model Core can switch off.
+
+        Such models turn reasoning off through ``use_thinking=False`` rather
+        than an effort level, so ``none`` stands in for that switch.
+        """
+        return (
+            self.control_mode == "effort"
+            and self.thinking_off == THINKING_OFF_DISABLED
+            and NO_REASONING_EFFORT not in self.effort_options
+        )
+
+    @property
+    def effort_choices(self) -> tuple[str, ...]:
+        """Effort levels offered in the UI, lowest first."""
+        if self.adds_no_reasoning_effort:
+            return (NO_REASONING_EFFORT, *self.effort_options)
+        return self.effort_options
+
+    def reasoning(self, thinking: bool, effort: str | None) -> tuple[bool, str | None]:
+        """Map the UI choice onto Core's ``use_thinking`` and ``effort``."""
+        if self.control_mode == "always_on":
+            return True, None
+        if self.control_mode == "thinking":
+            return bool(thinking), None
+        if self.control_mode != "effort":
+            return False, None
+        # ``none`` exists only where reasoning can truly be turned off; never
+        # let a stale level stand in for Core's lowest-effort fallback.
+        if effort not in self.effort_choices:
+            raise ValueError(f"unsupported effort for {self.model}: {effort!r}")
+        if effort == NO_REASONING_EFFORT and self.adds_no_reasoning_effort:
+            return False, None
+        return True, effort
+
+    def effective_temperature(self, requested: float, thinking: bool) -> float | None:
+        """Return the temperature Core sends for this model and thinking choice."""
+        if not self.temperature_supported:
+            return None
+        if thinking and self.thinking_fixed_temperature is not None:
+            return self.thinking_fixed_temperature
+        return requested
 
 
 @dataclass(frozen=True)
@@ -105,15 +160,65 @@ def _efforts(config: Mapping[str, Any]) -> tuple[str, ...]:
     return result
 
 
+def _thinking_off(
+    config: Mapping[str, Any], label: str, *, thinking: bool, default: str | None
+) -> str | None:
+    value = config.get("thinking_off", default if thinking else None)
+    if thinking:
+        if value not in _THINKING_OFF_MODES:
+            raise CatalogError(
+                f"{label} thinking_off must be one of: {', '.join(_THINKING_OFF_MODES)}"
+            )
+    elif value is not None:
+        raise CatalogError(f"{label} thinking_off requires extended_thinking")
+    return value
+
+
+def _fixed_temperature(
+    config: Mapping[str, Any], label: str, *, temperature_supported: bool
+) -> float | None:
+    value = config.get("thinking_fixed_temperature")
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not 0 <= value <= MAX_TEMPERATURE
+    ):
+        raise CatalogError(
+            f"{label} thinking_fixed_temperature must be between 0.0 and "
+            f"{MAX_TEMPERATURE} or null"
+        )
+    if not temperature_supported:
+        raise CatalogError(
+            f"{label} thinking_fixed_temperature requires temperature support"
+        )
+    return float(value)
+
+
 def _control_mode(
-    *, thinking_supported: bool, efforts: tuple[str, ...], temperature_supported: bool
+    *, thinking_supported: bool, efforts: tuple[str, ...], thinking_off: str | None
 ) -> str:
-    """Classify controls exclusively from Core's capability shape."""
+    """Classify reasoning controls exclusively from Core's capability shape.
+
+    Each model gets at most one way to choose reasoning:
+
+    - ``effort``: levels only.  Where reasoning can be turned off, the levels
+      include ``none``: Core's own ``none`` effort, or one Studio adds that
+      sends ``use_thinking=False``.
+    - ``always_on``: no reasoning control, because reasoning cannot be turned
+      off and there are no levels to choose from.
+    - ``thinking``: an on/off toggle for models without levels.
+
+    Temperature is independent and follows ``temperature_supported``.
+    """
+    if not thinking_supported:
+        return "temperature"
     if efforts:
         return "effort"
-    if thinking_supported and temperature_supported:
-        return "legacy_thinking"
-    return "temperature"
+    if thinking_off == THINKING_OFF_LOWEST_EFFORT:
+        return "always_on"
+    return "thinking"
 
 
 def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapability:
@@ -126,6 +231,11 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
     efforts = _efforts(raw)
     always_on = _bool(raw, "always_on_adaptive_thinking")
     temp_supported = _bool(raw, "temperature_supported", True)
+    label = f"{provider}/{model}"
+    thinking_off = _thinking_off(raw, label, thinking=thinking, default=None)
+    fixed_temperature = _fixed_temperature(
+        raw, label, temperature_supported=temp_supported
+    )
     rate_limits = raw.get("rate_limits")
     if not isinstance(rate_limits, Mapping):
         raise CatalogError(f"{provider}/{model} must define rate_limits")
@@ -155,11 +265,11 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
         always_on_adaptive_thinking=always_on,
         temperature_supported=temp_supported,
         control_mode=_control_mode(
-            thinking_supported=thinking,
-            efforts=efforts,
-            temperature_supported=temp_supported,
+            thinking_supported=thinking, efforts=efforts, thinking_off=thinking_off
         ),
         rpm=rpm,
+        thinking_off=thinking_off,
+        thinking_fixed_temperature=fixed_temperature,
     )
 
 
@@ -178,16 +288,18 @@ def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
     if efforts and not thinking:
         raise CatalogError(f"Ollama/{model} effort_options require extended_thinking")
     temp_supported = _bool(raw, "temperature_supported", True)
-    mode = _control_mode(
-        thinking_supported=thinking,
-        efforts=efforts,
-        temperature_supported=temp_supported,
+    label = f"Ollama/{model}"
+    # Core derives ``thinking_off`` from Ollama's reported think values; mirror
+    # Core's own fallback when an entry omits it.
+    thinking_off = _thinking_off(
+        raw,
+        label,
+        thinking=thinking,
+        default=THINKING_OFF_LOWEST_EFFORT if efforts else THINKING_OFF_DISABLED,
     )
-    # Ollama-specific: Core sends the requested temperature with ``think``, so
-    # the thinking toggle must not lock temperature the way legacy cloud
-    # thinking does.
-    if mode == "legacy_thinking":
-        mode = "thinking_toggle"
+    fixed_temperature = _fixed_temperature(
+        raw, label, temperature_supported=temp_supported
+    )
     return ModelCapability(
         provider=OLLAMA_PROVIDER,
         model=model,
@@ -198,8 +310,12 @@ def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
         max_thinking_budget=None,
         always_on_adaptive_thinking=False,
         temperature_supported=temp_supported,
-        control_mode=mode,
+        control_mode=_control_mode(
+            thinking_supported=thinking, efforts=efforts, thinking_off=thinking_off
+        ),
         rpm=None,
+        thinking_off=thinking_off,
+        thinking_fixed_temperature=fixed_temperature,
     )
 
 
@@ -406,7 +522,12 @@ __all__ = [
     "CORE_CLOUD_PROVIDERS",
     "DEFAULT_OLLAMA_HOST",
     "DEFAULT_OLLAMA_TIMEOUT",
+    "DEFAULT_PROVIDER",
+    "MAX_TEMPERATURE",
+    "NO_REASONING_EFFORT",
     "OLLAMA_PROVIDER",
+    "THINKING_OFF_DISABLED",
+    "THINKING_OFF_LOWEST_EFFORT",
     "CatalogError",
     "ModelCapability",
     "ModelCatalog",
