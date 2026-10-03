@@ -86,7 +86,7 @@ a collapsed **Advanced Settings** section holds **Ollama Context Size**:
 **Ollama default** (the default, which sends no `num_ctx`, so the server's
 `OLLAMA_CONTEXT_LENGTH` or Modelfile applies) or 1,024, 4,096, 16,384, 65,536,
 or 262,144 tokens. The choice is saved with the session, sent as Core's
-`ollama_num_ctx`, and shown on each card. Larger
+`ollama_num_ctx`, and shown with the shared session settings above the cards. Larger
 windows use more memory and can stop a model from loading. Core does not report
 a model's maximum context, so Studio does not hide larger presets. If a batch
 fails because the model ran out of context, lower or turn off thinking, choose
