@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -275,7 +276,31 @@ def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
 
 def test_view_values_has_fixed_batch_output_shape():
     view = AppView(None, tuple(_empty_card(slot) for slot in ("01", "02", "03", "04")))
-    assert len(_view_values(view)) == 41
+    assert len(_view_values(view)) == 38
+
+
+def test_card_updates_condense_ready_status_and_preserve_progress_and_warnings():
+    cards = tuple(_empty_card(slot) for slot in ("01", "02", "03", "04"))
+    cards = (
+        replace(
+            cards[0],
+            status="Ready",
+            progress="Rendering complete",
+            metadata="OpenAI · test · temperature 0.7",
+            warning="Audio unavailable; MIDI is ready.",
+        ),
+        replace(cards[1], status="Processing MIDI", progress="Writing MIDI · 50%"),
+        *cards[2:],
+    )
+    values = _view_values(AppView("session", cards))
+    assert values[0] == "### Variant 1 · Ready"
+    assert values[1]["visible"] is False
+    assert values[2]["visible"] is True
+    assert values[2]["value"] == cards[0].warning
+    assert values[9]["visible"] is True
+    assert values[9]["value"] == "Writing MIDI · 50%"
+    assert values[32]["value"] == cards[0].metadata
+    assert values[32]["visible"] is True
 
 
 class _RetryService:
@@ -330,7 +355,7 @@ def test_audio_retry_callback_streams_its_own_slot_without_generation():
         assert inspect.isgeneratorfunction(callback)
         updates = list(callback(manifest.session_id))
         assert len(updates) == 2
-        assert all(len(update) == 41 for update in updates)
+        assert all(len(update) == 38 for update in updates)
     assert service.retries == [
         (manifest.session_id, s) for s in ("01", "02", "03", "04")
     ]

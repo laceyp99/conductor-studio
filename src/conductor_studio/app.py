@@ -574,9 +574,11 @@ def _view_values(view: AppView) -> list[Any]:
     for card in view.cards:
         values.extend(
             [
-                card.status,
-                card.progress,
-                card.metadata,
+                f"### {card.title} · {card.status}",
+                _update(
+                    card.progress,
+                    visible=card.status != "Ready" and card.progress != card.status,
+                ),
                 _update(card.warning, visible=bool(card.warning)),
                 card.image_path,
                 card.audio_path,
@@ -591,6 +593,7 @@ def _view_values(view: AppView) -> list[Any]:
         )
     return [
         *values,
+        _update(view.cards[0].metadata, visible=bool(view.session_id)),
         view.session_id,
         view.notice,
         view.accounting,
@@ -640,18 +643,14 @@ def _control_values(view: ControlView) -> tuple[Any, ...]:
 
 def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
     with gr.Column(elem_classes=["variant-card"], key=f"card-{slot_id}", min_width=0):
-        gr.Markdown(f"### Variant {int(slot_id)}")
-        status, progress = gr.Markdown("Waiting"), gr.Markdown("Queued")
-        metadata, warning = (
-            gr.Markdown("Parameters will appear here."),
-            gr.Markdown(visible=False),
-        )
-        gr.Markdown("Piano roll · 4 bars · color intensity follows velocity")
+        status = gr.Markdown(f"### Variant {int(slot_id)} · Waiting")
+        progress = gr.Markdown("Queued")
+        warning = gr.Markdown(visible=False)
         image = gr.Image(
             type="filepath",
             interactive=False,
             buttons=["download", "fullscreen"],
-            height=400,
+            height=220,
             label=f"Piano roll for Variant {int(slot_id)}",
             elem_classes=["piano-roll"],
         )
@@ -670,8 +669,8 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
             queue=False,
             api_visibility="private",
         )
-        midi = gr.DownloadButton("Download MIDI", visible=False)
         with gr.Row():
+            midi = gr.DownloadButton("Download MIDI", visible=False, size="sm")
             favorite, audio_retry = (
                 gr.Button("☆ Favorite", size="sm", interactive=False),
                 gr.Button("Retry audio", size="sm", visible=False),
@@ -679,7 +678,6 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
     return {
         "status": status,
         "progress": progress,
-        "metadata": metadata,
         "warning": warning,
         "image": image,
         "audio": audio,
@@ -883,6 +881,10 @@ def create_app(
             # hidden elsewhere. Reopen events update this same read-only batch
             # presentation instead of hidden tab-local output.
             with gr.Column(elem_id="results") as results:
+                session_metadata = gr.Markdown(visible=False)
+                gr.Markdown(
+                    "Piano rolls · 4 bars · sixteenth-note resolution · color intensity follows velocity"
+                )
                 with gr.Row(elem_id="variant-grid"):
                     cards = [_build_card(gr, slot) for slot in VariantSlot.SLOT_IDS]
                 accounting = gr.Markdown(
@@ -896,7 +898,6 @@ def create_app(
             for name in (
                 "status",
                 "progress",
-                "metadata",
                 "warning",
                 "image",
                 "audio",
@@ -907,6 +908,7 @@ def create_app(
         ]
         app_outputs = [
             *card_outputs,
+            session_metadata,
             active_session,
             notice,
             accounting,

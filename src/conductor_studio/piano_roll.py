@@ -241,9 +241,6 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
             if pitch % 12 == 0 or pitch in played_pitches
         )
         axis.set_yticks(y_ticks, tuple(_pitch_label(note) for note in y_ticks))
-        axis.set_xlabel(
-            "Four-bar timeline · sixteenth-note resolution", color="#aab4c5"
-        )
         axis.set_ylabel("Pitch", color="#aab4c5")
         axis.tick_params(colors="#c8d2e3", labelsize=9)
         for spine in axis.spines.values():
@@ -298,12 +295,14 @@ def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
                 va="center",
                 fontsize=10,
             )
-        figure.tight_layout(pad=1.0)
+        figure.tight_layout(pad=0.35)
         stream = io.BytesIO()
         figure.savefig(
             stream,
             format="png",
             dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.025,
             metadata={"Software": "Conductor Studio", "Creation Time": None},
         )
         return stream.getvalue()
@@ -316,7 +315,7 @@ def render_loop(
     output_path: str | Path,
     *,
     width: float = 12.0,
-    height: float = 6.0,
+    height: float = 3.6,
     dpi: int = 144,
 ) -> Path:
     """Render ``loop`` to a deterministic PNG and atomically replace the target.

@@ -40,7 +40,7 @@ def test_render_loop_writes_valid_nonempty_png_and_is_deterministic(tmp_path: Pa
     with Image.open(first) as image:
         assert image.format == "PNG"
         assert image.width >= 1_700
-        assert image.height >= 850
+        assert 480 <= image.height <= 520
         assert len(image.getcolors(maxcolors=image.width * image.height)) > 10
 
 
