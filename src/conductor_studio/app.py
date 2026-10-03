@@ -658,8 +658,17 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         audio = gr.Audio(
             type="filepath",
             interactive=False,
+            loop=True,
             buttons=["download"],
             label=f"Audio preview for Variant {int(slot_id)}",
+            elem_id=f"variant-audio-{slot_id}",
+            elem_classes=["variant-audio"],
+        )
+        audio.play(
+            fn=None,
+            js=_exclusive_audio_js(slot_id),
+            queue=False,
+            api_visibility="private",
         )
         midi = gr.DownloadButton("Download MIDI", visible=False)
         with gr.Row():
@@ -678,6 +687,25 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         "favorite": favorite,
         "audio_retry": audio_retry,
     }
+
+
+def _exclusive_audio_js(slot_id: str) -> str:
+    """Restart the selected preview and pause others, including shadow DOM media."""
+    return """() => {
+        const updateAudio = (root, restart) => {
+            root.querySelectorAll("audio").forEach(audio => {
+                if (restart) audio.currentTime = 0;
+                else audio.pause();
+            });
+            root.querySelectorAll("*").forEach(element => {
+                if (element.shadowRoot) updateAudio(element.shadowRoot, restart);
+            });
+        };
+        document.querySelectorAll("#variant-grid .variant-audio").forEach(player => {
+            updateAudio(player, player.id === "variant-audio-SLOT");
+        });
+        return [];
+    }""".replace("SLOT", slot_id)
 
 
 def create_app(
