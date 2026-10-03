@@ -139,6 +139,30 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
     assert "Retry" not in button_values
     assert button_values.count("Retry audio") == 4
     assert "Generate Variations" in button_values
+    audio_players = [
+        component for component in config["components"] if component["type"] == "audio"
+    ]
+    assert len(audio_players) == 4
+    assert {player["props"]["elem_id"] for player in audio_players} == {
+        f"variant-audio-{slot}" for slot in ("01", "02", "03", "04")
+    }
+    for player in audio_players:
+        assert player["props"]["loop"] is True
+        assert "variant-audio" in player["props"]["elem_classes"]
+        (play_handler,) = [
+            dependency
+            for dependency in config["dependencies"]
+            if any(
+                tuple(target) == (player["id"], "play")
+                for target in dependency["targets"]
+            )
+        ]
+        assert play_handler["backend_fn"] is False
+        assert play_handler["queue"] is False
+        assert play_handler["inputs"] == []
+        assert play_handler["outputs"] == []
+        assert play_handler["js"]
+        assert player["props"]["elem_id"] in play_handler["js"]
     component_by_elem_id = {
         component["props"]["elem_id"]: component["id"]
         for component in config["components"]
