@@ -196,6 +196,17 @@ def _card_view(
     warnings = [*slot.warnings]
     if slot.audio.failure:
         warnings.append(slot.audio.failure.message)
+    unavailable = [
+        label
+        for kind, label, ref in (
+            ("piano_roll", "piano roll", slot.artifacts.piano_roll),
+            ("audio", "audio preview", slot.artifacts.audio),
+            ("midi", "MIDI", slot.artifacts.midi),
+        )
+        if ref and not published.get(kind)
+    ]
+    if unavailable:
+        warnings.append(f"Unavailable: {', '.join(unavailable)}.")
     retry_audio = (
         slot.midi is MidiState.READY
         and slot.audio.state
@@ -509,26 +520,6 @@ class StudioController:
         with suppress(Exception):
             published = self.publisher.publish_slot(self.service.store, manifest, slot)
         card = _card_view(manifest, slot, published, self.service.store)
-        unavailable = [
-            name
-            for name, ref in (
-                ("piano roll", slot.artifacts.piano_roll),
-                ("audio preview", slot.artifacts.audio),
-                ("MIDI", slot.artifacts.midi),
-            )
-            if ref
-            and not published.get(
-                {"piano roll": "piano_roll", "audio preview": "audio", "MIDI": "midi"}[
-                    name
-                ]
-            )
-        ]
-        warning = card.warning
-        if unavailable:
-            warning = "\n".join(
-                filter(None, (warning, f"Unavailable: {', '.join(unavailable)}."))
-            )
-            card = replace(card, warning=warning)
         return FavoritesView(
             choices,
             selection,

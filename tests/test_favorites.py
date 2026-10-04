@@ -185,6 +185,55 @@ def test_missing_midi_blocks_star_but_allows_unfavorite(favorites):
     assert not store.load(newer.session_id).slot("01").favorite
 
 
+@pytest.mark.parametrize(
+    ("kind", "label"),
+    [("piano_roll", "piano roll"), ("audio", "audio preview"), ("midi", "MIDI")],
+)
+@pytest.mark.parametrize("failure", ["missing", "copy"])
+def test_media_warnings_match_history_and_favorites_without_hiding_usable_files(
+    favorites, monkeypatch, kind, label, failure
+):
+    controller, store, _, newer = favorites
+    manifest = store.load(newer.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/piano-roll.png"
+    slot.artifacts.audio = "variants/01/preview.mp3"
+    slot.audio = AudioInfo(state=AudioState.READY)
+    store.save(manifest)
+    for ref in (slot.artifacts.piano_roll, slot.artifacts.audio):
+        path = store.session_dir(newer.session_id) / ref
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"offline media fixture")
+    broken_ref = getattr(slot.artifacts, kind)
+    if failure == "missing":
+        store.artifact_path(newer.session_id, broken_ref).unlink()
+    else:
+        original = controller.publisher.publish_path
+
+        def publish(*args):
+            if args[-1] == broken_ref:
+                raise PermissionError(
+                    "private local path and secret=fixture must not appear"
+                )
+            return original(*args)
+
+        monkeypatch.setattr(controller.publisher, "publish_path", publish)
+
+    history_card = controller.reopen(newer.session_id).cards[0]
+    favorite_card = controller.favorites_view(identity(newer, "01")).card
+    assert history_card.warning == favorite_card.warning == f"Unavailable: {label}."
+    for media_kind, field in (
+        ("piano_roll", "image_path"),
+        ("audio", "audio_path"),
+        ("midi", "midi_path"),
+    ):
+        assert bool(getattr(history_card, field)) is (media_kind != kind)
+        assert bool(getattr(favorite_card, field)) is (media_kind != kind)
+    assert history_card.favorite_enabled
+    assert favorite_card.favorite_enabled
+    assert store.load(newer.session_id).slot("01").favorite
+
+
 def test_stale_identity_and_invalid_slot_fail_gracefully(favorites):
     controller, _, _, newer = favorites
     rejected = controller.toggle_favorite(newer.session_id, "99")
