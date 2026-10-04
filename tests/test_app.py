@@ -143,13 +143,15 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
     audio_players = [
         component for component in config["components"] if component["type"] == "audio"
     ]
-    assert len(audio_players) == 4
+    assert len(audio_players) == 5
     assert {player["props"]["elem_id"] for player in audio_players} == {
-        f"variant-audio-{slot}" for slot in ("01", "02", "03", "04")
+        *(f"variant-audio-{slot}" for slot in ("01", "02", "03", "04")),
+        "favorite-audio",
     }
     for player in audio_players:
         assert player["props"]["loop"] is True
-        assert "variant-audio" in player["props"]["elem_classes"]
+        if player["props"]["elem_id"].startswith("variant-audio-"):
+            assert "variant-audio" in player["props"]["elem_classes"]
         (play_handler,) = [
             dependency
             for dependency in config["dependencies"]
@@ -164,6 +166,7 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
         assert play_handler["outputs"] == []
         assert play_handler["js"]
         assert player["props"]["elem_id"] in play_handler["js"]
+        assert player["props"]["autoplay"] is False
     component_by_elem_id = {
         component["props"]["elem_id"]: component["id"]
         for component in config["components"]
