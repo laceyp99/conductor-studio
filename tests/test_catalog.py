@@ -358,9 +358,6 @@ def test_discovery_bounds_the_actual_http_request(monkeypatch, timeout):
 
     def stalled_server(request):
         requests.append(request)
-        assert request.extensions["timeout"] == dict.fromkeys(
-            ("connect", "read", "write", "pool"), timeout
-        )
         raise httpx.ReadTimeout("stalled discovery", request=request)
 
     monkeypatch.setattr(
@@ -377,6 +374,9 @@ def test_discovery_bounds_the_actual_http_request(monkeypatch, timeout):
     assert status.available is False
     assert status.models == ()
     assert [request.url.path for request in requests] == ["/api/tags"]
+    assert requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), timeout
+    )
     assert catalog.lookup("OpenAI", "gpt-5").control_mode == "effort"
 
 
