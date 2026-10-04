@@ -785,6 +785,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         _update(interactive=bool(card)),
         _update(interactive=bool(card)),
         view.notice,
+        card.audio_path if card else None,
     )
 
 
@@ -951,6 +952,7 @@ def create_app(
             active_session = gr.State(None)
             favorite_selection = gr.State(None)
             favorite_order = gr.State(())
+            favorite_audio_path = gr.State(None)
             control_mode = gr.State(controls.mode)
             requested_temperature = gr.State(controls.requested_temperature)
             with gr.Tabs(selected="generate") as tabs:
@@ -1186,11 +1188,13 @@ def create_app(
             unfavorite,
             source_session,
             favorite_notice,
+            favorite_audio_path,
         ]
 
         def refreshed_favorites(
             selected: str | None,
             previous: tuple[str, ...],
+            audio_path: str | None = None,
             *,
             entering: bool = False,
             notice: str = "",
@@ -1208,6 +1212,7 @@ def create_app(
                 and view.selection == selected
                 and view.card is not None
                 and view.card.audio_path is not None
+                and view.card.audio_path == audio_path
             ):
                 values[6] = _skip()
             return tuple(values)
@@ -1216,35 +1221,48 @@ def create_app(
             session: str | None,
             selected: str | None,
             previous: tuple[str, ...],
+            audio_path: str | None,
             slot: str,
         ) -> tuple[Any, ...]:
             view = controller.toggle_favorite(session, slot)
             return (
                 *_view_values(view),
                 *refreshed_favorites(
-                    selected, previous, notice=view.notice, preserve_audio=True
+                    selected,
+                    previous,
+                    audio_path,
+                    notice=view.notice,
+                    preserve_audio=True,
                 ),
                 _update(choices=list(controller.history().history_choices)),
             )
 
+        audio_retry_handles = []
         for index, slot_id in enumerate(VariantSlot.SLOT_IDS):
             cards[index]["favorite"].click(
-                lambda session, selected, previous, slot=slot_id: favorite_card_event(
-                    session, selected, previous, slot
+                lambda session, selected, previous, audio_path, slot=slot_id: (
+                    favorite_card_event(session, selected, previous, audio_path, slot)
                 ),
-                [active_session, favorite_selection, favorite_order],
+                [
+                    active_session,
+                    favorite_selection,
+                    favorite_order,
+                    favorite_audio_path,
+                ],
                 [*app_outputs, *favorite_outputs, history_choice],
                 api_visibility="private",
                 concurrency_limit=1,
                 concurrency_id="library",
             )
-            cards[index]["audio_retry"].click(
-                _audio_retry_callback(controller, slot_id),
-                active_session,
-                app_outputs,
-                concurrency_limit=1,
-                concurrency_id="generation",
-                api_visibility="private",
+            audio_retry_handles.append(
+                cards[index]["audio_retry"].click(
+                    _audio_retry_callback(controller, slot_id),
+                    active_session,
+                    app_outputs,
+                    concurrency_limit=1,
+                    concurrency_id="generation",
+                    api_visibility="private",
+                )
             )
 
         control_inputs = [
@@ -1320,6 +1338,7 @@ def create_app(
             selected: str | None,
             previous: tuple[str, ...],
             history_selected: str | None,
+            audio_path: str | None = None,
             *,
             entering: bool = False,
         ) -> tuple[Any, ...]:
@@ -1331,7 +1350,11 @@ def create_app(
                     value=history_selected if history_selected in history_ids else None,
                 ),
                 *refreshed_favorites(
-                    selected, previous, entering=entering, preserve_audio=not entering
+                    selected,
+                    previous,
+                    audio_path,
+                    entering=entering,
+                    preserve_audio=not entering,
                 ),
             )
 
@@ -1342,6 +1365,23 @@ def create_app(
             api_visibility="private",
         )
         for handle in (generate_event_handle, prompt_event_handle):
+            handle.then(
+                refresh_library,
+                [
+                    favorite_selection,
+                    favorite_order,
+                    history_choice,
+                    favorite_audio_path,
+                ],
+                [history_choice, *favorite_outputs],
+                api_visibility="private",
+                concurrency_limit=1,
+                concurrency_id="library",
+            )
+
+        # A retry can replace the audio at the same path. Refresh it on completion
+        # even if this browser already loaded that loop before the retry started.
+        for handle in audio_retry_handles:
             handle.then(
                 refresh_library,
                 [favorite_selection, favorite_order, history_choice],

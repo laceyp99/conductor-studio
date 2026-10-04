@@ -1,6 +1,7 @@
 """Offline regression coverage for the individual-loop favorites flow."""
 
 from datetime import datetime, timezone
+from threading import Event
 
 import pytest
 
@@ -13,6 +14,10 @@ from conductor_studio.app import (
 from conductor_studio.credentials import CredentialStore
 from conductor_studio.media import MediaPublisher
 from conductor_studio.models import (
+    AudioInfo,
+    AudioState,
+    ErrorCategory,
+    FailureInfo,
     MidiState,
     SessionManifest,
     SessionSettings,
@@ -237,7 +242,7 @@ def test_source_callback_loads_history_and_handles_trashed_source(favorites):
     assert result[40]["visible"] is True
     controller.trash(newer.session_id)
     stale = callback(app, "open_source_event")(view.selection, order)
-    assert "unavailable" in stale[-1]
+    assert "unavailable" in stale[-2]
     assert newer.session_id not in stale[42]
 
 
@@ -270,7 +275,7 @@ def test_refresh_clears_audio_that_disappeared_and_preserves_history_selection(
     order = tuple(value for _, value in view.choices)
     assert view.card.audio_path
     refresh = callback(app, "refresh_library")
-    preserved = refresh(selected, order, newer.session_id)
+    preserved = refresh(selected, order, newer.session_id, view.card.audio_path)
     assert preserved[0]["value"] == newer.session_id
     assert preserved[7] == {"__type__": "update"}  # unchanged audio source
     audio.unlink()
@@ -278,6 +283,11 @@ def test_refresh_clears_audio_that_disappeared_and_preserves_history_selection(
     assert missing[0]["value"] is None
     assert missing[7] is None
     assert "audio preview" in missing[5]["value"]
+    assert missing[-1] is None
+    audio.write_bytes(b"ID3")
+    restored = refresh(selected, order, newer.session_id, missing[-1])
+    assert restored[7] == view.card.audio_path
+    assert restored[-1] == view.card.audio_path
 
 
 def test_unfavorite_callback_refreshes_sidebar_batch_labels_and_history(favorites):
@@ -291,9 +301,72 @@ def test_unfavorite_callback_refreshes_sidebar_batch_labels_and_history(favorite
     )
     assert not store.load(newer.session_id).slot("01").favorite
     assert result[1] == identity(newer, "03")
-    assert result[11 + 6]["value"] == "\u2606 Favorite"
+    assert result[12 + 6]["value"] == "\u2606 Favorite"
     assert result[-1]["value"] == newer.session_id
     assert newer.session_id in [value for _, value in result[-1]["choices"]]
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_retry_completion_refreshes_favorite_opened_during_audio_work(
+    favorites, succeeds
+):
+    controller, store, _, newer = favorites
+    manifest = store.load(newer.session_id)
+    manifest.slot("01").audio = AudioInfo(
+        state=AudioState.FAILED,
+        retryable=True,
+        failure=FailureInfo(
+            category=ErrorCategory.AUDIO, message="Offline fixture failure"
+        ),
+    )
+    store.save(manifest)
+    gate = Event()
+
+    class Adapter:
+        def render_audio(self, manifest, slot_id):
+            if not gate.wait(5):
+                raise RuntimeError("test did not release the audio retry")
+            if not succeeds:
+                raise RuntimeError("offline render failure")
+            slot = manifest.slot(slot_id)
+            slot.artifacts.audio = f"variants/{slot_id}/preview.mp3"
+            path = store.session_dir(manifest.session_id) / slot.artifacts.audio
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"ID3")
+            slot.audio = AudioInfo(state=AudioState.READY)
+
+    controller.service.adapter_factory = lambda *args: Adapter()
+    app = build_app(controller)
+    selected = identity(newer, "01")
+    order = tuple(value for _, value in controller.favorites_view(selected).choices)
+    stream = callback(app, "retry")(newer.session_id)
+    try:
+        next(stream)
+        busy = callback(app, "refresh_library")(selected, order, newer.session_id)
+        assert busy[7] is None
+        assert busy[9]["interactive"] is False
+    finally:
+        gate.set()
+        list(stream)
+
+    config = app.get_config_file()
+    retry = next(
+        dep
+        for dep in config["dependencies"]
+        if getattr(app.fns[dep["id"]].fn, "__name__", None) == "retry"
+    )
+    completion = next(
+        dep for dep in config["dependencies"] if dep["trigger_after"] == retry["id"]
+    )
+    refreshed = app.fns[completion["id"]].fn(selected, order, newer.session_id)
+    assert refreshed[2] == selected
+    assert refreshed[9]["interactive"] is True
+    if succeeds:
+        assert refreshed[7] == controller.favorites_view(selected).card.audio_path
+        assert refreshed[-1] == refreshed[7]
+    else:
+        assert refreshed[7] is None
+        assert "Audio rendering failed" in refreshed[5]["value"]
 
 
 def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favorites):
@@ -313,8 +386,19 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
         for dep in config["dependencies"]
         if getattr(app.fns[dep["id"]].fn, "__name__", None) == "refresh_library"
     ]
-    assert len(refreshes) == 2  # button and prompt-submit completion
+    assert len(refreshes) == 6  # generation button/submit and all four audio retries
     assert all(dep["trigger_after"] is not None for dep in refreshes)
+    retry_dependencies = [
+        dep
+        for dep in config["dependencies"]
+        if getattr(app.fns[dep["id"]].fn, "__name__", None) == "retry"
+    ]
+    assert len(retry_dependencies) == 4
+    for retry in retry_dependencies:
+        refresh = next(dep for dep in refreshes if dep["trigger_after"] == retry["id"])
+        assert sidebar["id"] in refresh["outputs"]
+        # Omit the previous audio path to reload a replacement at the same path.
+        assert len(refresh["inputs"]) == 3
     for component in config["components"]:
         if component["type"] == "button" and component["props"].get("value") in {
             "\u2606 Favorite",
