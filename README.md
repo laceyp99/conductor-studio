@@ -76,7 +76,8 @@ model names. Each model gets at most one way to choose reasoning:
 
 Studio opens on Google's newest model (the first one Core lists) with the
 description "a rhythmic sad pop piano". The default requested temperature is `0.7`
-over Core's `0.0`–`2.0` range. The pinned Core contract has no seed field, so
+within Studio's `0.0`–`1.0` slider range for all models, avoiding values that
+some providers reject. The pinned Core contract has no seed field, so
 Studio neither offers nor emulates one.
 
 Ollama models are discovered when the page loads and again on **Refresh Ollama

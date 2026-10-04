@@ -810,7 +810,7 @@ def create_app(
                             )
                             temperature = gr.Slider(
                                 0.0,
-                                2.0,
+                                1.0,
                                 value=controls.temperature_value,
                                 step=0.1,
                                 label="Temperature",
