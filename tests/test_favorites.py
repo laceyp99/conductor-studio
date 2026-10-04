@@ -284,13 +284,13 @@ def test_source_callback_loads_history_and_handles_trashed_source(favorites):
     app = build_app(controller)
     view = controller.favorites_view(identity(newer, "03"))
     order = tuple(value for _, value in view.choices)
-    result = callback(app, "open_source_event")(view.selection, order)
+    result = callback(app, "open_source_event")(view.selection, order, view.selection)
     assert result[33] == newer.session_id
     assert result[38]["value"] == newer.session_id
     assert result[39].selected == "history"
     assert result[40]["visible"] is True
     controller.trash(newer.session_id)
-    stale = callback(app, "open_source_event")(view.selection, order)
+    stale = callback(app, "open_source_event")(view.selection, order, view.selection)
     assert "unavailable" in stale[-2]
     assert newer.session_id not in stale[42]
 
@@ -346,13 +346,40 @@ def test_unfavorite_callback_refreshes_sidebar_batch_labels_and_history(favorite
     view = controller.favorites_view(selected)
     order = tuple(value for _, value in view.choices)
     result = callback(app, "unfavorite_event")(
-        selected, order, newer.session_id, newer.session_id
+        selected, order, newer.session_id, newer.session_id, selected
     )
     assert not store.load(newer.session_id).slot("01").favorite
     assert result[1] == identity(newer, "03")
     assert result[12 + 6]["value"] == "\u2606 Favorite"
     assert result[-1]["value"] == newer.session_id
     assert newer.session_id in [value for _, value in result[-1]["choices"]]
+
+
+def test_pending_sidebar_selection_cannot_remove_or_open_the_previous_loop(favorites):
+    controller, store, older, newer = favorites
+    app = build_app(controller)
+    selected = identity(newer, "01")
+    chosen = identity(older, "03")
+    order = tuple(value for _, value in controller.favorites_view(selected).choices)
+    result = callback(app, "unfavorite_event")(
+        selected, order, newer.session_id, newer.session_id, chosen
+    )
+    assert store.load(newer.session_id).slot("01").favorite
+    assert store.load(older.session_id).slot("03").favorite
+    assert "finish loading" in result[10]
+    assert all(value == {"__type__": "update"} for value in result[12:])
+    source = callback(app, "open_source_event")(selected, order, chosen)
+    assert all(value == {"__type__": "update"} for value in source[:41])
+    assert "finish loading" in source[51]
+    # Once the latest choice settles, actions operate on that exact loop.
+    settled = callback(app, "select_favorite")(chosen, order)
+    source = callback(app, "open_source_event")(settled[1], settled[2], chosen)
+    assert source[33] == older.session_id
+    callback(app, "unfavorite_event")(
+        settled[1], settled[2], newer.session_id, newer.session_id, chosen
+    )
+    assert not store.load(older.session_id).slot("03").favorite
+    assert store.load(newer.session_id).slot("01").favorite
 
 
 @pytest.mark.parametrize("succeeds", [True, False])
@@ -461,6 +488,19 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
     config = app.get_config_file()
     ids = {c["props"].get("elem_id"): c["id"] for c in config["components"]}
     sidebar = next(c for c in config["components"] if c["type"] == "radio")
+    selection = next(
+        dep
+        for dep in config["dependencies"]
+        if getattr(app.fns[dep["id"]].fn, "__name__", None) == "select_favorite"
+    )
+    assert selection["trigger_mode"] == "always_last"
+    for name in ("unfavorite_event", "open_source_event"):
+        action = next(
+            dep
+            for dep in config["dependencies"]
+            if getattr(app.fns[dep["id"]].fn, "__name__", None) == name
+        )
+        assert action["inputs"][-1] == sidebar["id"]
     assert sidebar["id"] in [
         output for dep in config["dependencies"] for output in dep["outputs"]
     ]

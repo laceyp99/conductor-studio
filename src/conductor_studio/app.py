@@ -1452,6 +1452,7 @@ def create_app(
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="library",
+            trigger_mode="always_last",
         )
 
         def unfavorite_event(
@@ -1459,8 +1460,16 @@ def create_app(
             previous: tuple[str, ...],
             session: str | None,
             history_selected: str | None,
+            chosen: str | None,
         ) -> tuple[Any, ...]:
             from .services import ActiveSessionError
+
+            if chosen != selected:
+                values = [_skip()] * len(favorite_outputs)
+                values[10] = (
+                    "Wait for the selected loop to finish loading, then try again."
+                )
+                return (*values, *([_skip()] * len(app_outputs)), _skip())
 
             notice = "No favorite loop is selected."
             if selected and "|" in selected:
@@ -1506,7 +1515,13 @@ def create_app(
 
         unfavorite.click(
             unfavorite_event,
-            [favorite_selection, favorite_order, active_session, history_choice],
+            [
+                favorite_selection,
+                favorite_order,
+                active_session,
+                history_choice,
+                favorite_choice,
+            ],
             [*favorite_outputs, *app_outputs, history_choice],
             js=_PAUSE_AUDIO_JS,
             api_visibility="private",
@@ -1515,8 +1530,15 @@ def create_app(
         )
 
         def open_source_event(
-            selected: str | None, previous: tuple[str, ...]
+            selected: str | None, previous: tuple[str, ...], chosen: str | None
         ) -> tuple[Any, ...]:
+            if chosen != selected:
+                values = [_skip()] * len(favorite_outputs)
+                values[10] = (
+                    "Wait for the selected loop to finish loading, then try again."
+                )
+                return (*([_skip()] * (len(app_outputs) + 3)), *values)
+
             if selected and "|" in selected:
                 source_id = selected.split("|", 1)[0]
                 try:
@@ -1545,7 +1567,7 @@ def create_app(
 
         source_session.click(
             open_source_event,
-            [favorite_selection, favorite_order],
+            [favorite_selection, favorite_order, favorite_choice],
             [*app_outputs, history_choice, tabs, results, *favorite_outputs],
             js=_PAUSE_AUDIO_JS,
             api_visibility="private",
