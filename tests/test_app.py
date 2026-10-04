@@ -136,7 +136,7 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
         slider["props"]["maximum"],
         slider["props"]["step"],
         slider["props"]["value"],
-    ) == (0.0, 2.0, 0.1, 0.7)
+    ) == (0.0, 1.0, 0.1, 0.7)
     assert "Retry" not in button_values
     assert button_values.count("Retry audio") == 4
     assert "Generate Variations" in button_values
