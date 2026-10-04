@@ -358,7 +358,8 @@ def test_audio_retry_callback_streams_its_own_slot_without_generation():
         assert inspect.isgeneratorfunction(callback)
         updates = list(callback(manifest.session_id))
         assert len(updates) == 2
-        assert all(len(update) == 38 for update in updates)
+        assert all(len(update) == 39 for update in updates)
+        assert all(update[-1] == f"{manifest.session_id}|{slot}" for update in updates)
     assert service.retries == [
         (manifest.session_id, s) for s in ("01", "02", "03", "04")
     ]

@@ -390,7 +390,7 @@ def test_retry_completion_refreshes_favorite_opened_during_audio_work(
     order = tuple(value for _, value in controller.favorites_view(selected).choices)
     stream = callback(app, "retry")(newer.session_id)
     try:
-        next(stream)
+        initial = next(stream)
         busy = callback(app, "refresh_library")(selected, order, newer.session_id)
         assert busy[7] is None
         assert busy[9]["interactive"] is False
@@ -407,7 +407,9 @@ def test_retry_completion_refreshes_favorite_opened_during_audio_work(
     completion = next(
         dep for dep in config["dependencies"] if dep["trigger_after"] == retry["id"]
     )
-    refreshed = app.fns[completion["id"]].fn(selected, order, newer.session_id)
+    refreshed = app.fns[completion["id"]].fn(
+        selected, order, newer.session_id, None, initial[-1]
+    )
     assert refreshed[2] == selected
     assert refreshed[9]["interactive"] is True
     if succeeds:
@@ -416,6 +418,41 @@ def test_retry_completion_refreshes_favorite_opened_during_audio_work(
     else:
         assert refreshed[7] is None
         assert "Audio rendering failed" in refreshed[5]["value"]
+
+
+@pytest.mark.parametrize("retry_target", ["selected", "other_slot", "other_session"])
+def test_audio_completion_preserves_other_loops_but_reloads_the_retried_loop(
+    favorites, retry_target
+):
+    controller, store, older, newer = favorites
+    manifest = store.load(newer.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.audio = "variants/01/preview.mp3"
+    slot.audio = AudioInfo(state=AudioState.READY)
+    store.save(manifest)
+    audio = store.session_dir(newer.session_id) / slot.artifacts.audio
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"ID3")
+    app = build_app(controller)
+    selected = identity(newer, "01")
+    view = controller.favorites_view(selected)
+    order = tuple(value for _, value in view.choices)
+    retried = {
+        "selected": selected,
+        "other_slot": identity(newer, "03"),
+        "other_session": identity(older, "01"),
+    }[retry_target]
+    if retry_target == "selected":
+        audio.write_bytes(b"ID3 replaced at the same path")
+    refreshed = callback(app, "refresh_after_audio_retry")(
+        selected, order, older.session_id, view.card.audio_path, retried
+    )
+    assert refreshed[2] == selected
+    assert refreshed[9]["interactive"] is True
+    if retry_target == "selected":
+        assert refreshed[7] == view.card.audio_path
+    else:
+        assert refreshed[7] == {"__type__": "update"}
 
 
 def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favorites):
@@ -433,7 +470,8 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
     refreshes = [
         dep
         for dep in config["dependencies"]
-        if getattr(app.fns[dep["id"]].fn, "__name__", None) == "refresh_library"
+        if getattr(app.fns[dep["id"]].fn, "__name__", None)
+        in {"refresh_library", "refresh_after_audio_retry"}
     ]
     assert len(refreshes) == 6  # generation button/submit and all four audio retries
     assert all(dep["trigger_after"] is not None for dep in refreshes)
@@ -446,8 +484,10 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
     for retry in retry_dependencies:
         refresh = next(dep for dep in refreshes if dep["trigger_after"] == retry["id"])
         assert sidebar["id"] in refresh["outputs"]
-        # Omit the previous audio path to reload a replacement at the same path.
-        assert len(refresh["inputs"]) == 3
+        assert len(refresh["inputs"]) == 5
+        # The refresh consumes the retried identity captured by the generator,
+        # independently from the active History session or favorite selection.
+        assert refresh["inputs"][-1] == retry["outputs"][-1]
     for component in config["components"]:
         if component["type"] == "button" and component["props"].get("value") in {
             "\u2606 Favorite",

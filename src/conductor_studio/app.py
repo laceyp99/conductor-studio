@@ -747,7 +747,7 @@ def _audio_retry_callback(
     # Gradio streams only when the callback itself is a generator function.
     def retry(session_id: str) -> Iterator[list[Any]]:
         for view in controller.retry_audio(session_id, slot_id):
-            yield _view_values(view)
+            yield [*_view_values(view), f"{session_id}|{slot_id}"]
 
     return retry
 
@@ -944,6 +944,7 @@ def create_app(
             favorite_selection = gr.State(None)
             favorite_order = gr.State(())
             favorite_audio_path = gr.State(None)
+            audio_retry_selection = gr.State(None)
             control_mode = gr.State(controls.mode)
             requested_temperature = gr.State(controls.requested_temperature)
             with gr.Tabs(selected="generate") as tabs:
@@ -1249,7 +1250,7 @@ def create_app(
                 cards[index]["audio_retry"].click(
                     _audio_retry_callback(controller, slot_id),
                     active_session,
-                    app_outputs,
+                    [*app_outputs, audio_retry_selection],
                     concurrency_limit=1,
                     concurrency_id="generation",
                     api_visibility="private",
@@ -1370,12 +1371,32 @@ def create_app(
                 concurrency_id="library",
             )
 
-        # A retry can replace the audio at the same path. Refresh it on completion
-        # even if this browser already loaded that loop before the retry started.
+        def refresh_after_audio_retry(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None,
+            retried: str | None,
+        ) -> tuple[Any, ...]:
+            # Reload a replacement at the same path only for the retried loop.
+            # Other favorites keep their loaded source and uninterrupted playback.
+            return refresh_library(
+                selected,
+                previous,
+                history_selected,
+                None if selected == retried else audio_path,
+            )
+
         for handle in audio_retry_handles:
             handle.then(
-                refresh_library,
-                [favorite_selection, favorite_order, history_choice],
+                refresh_after_audio_retry,
+                [
+                    favorite_selection,
+                    favorite_order,
+                    history_choice,
+                    favorite_audio_path,
+                    audio_retry_selection,
+                ],
                 [history_choice, *favorite_outputs],
                 api_visibility="private",
                 concurrency_limit=1,
