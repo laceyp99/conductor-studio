@@ -79,8 +79,10 @@ over Core's `0.0`–`2.0` range. The pinned Core contract has no seed field, so
 Studio neither offers nor emulates one.
 
 Ollama models are discovered when the page loads and again on **Refresh Ollama
-models**. Their controls follow the same rules, based on the per-model
-capabilities Core reads from Ollama. Ollama reports no fixed thinking
+models**. Discovery lists names without inspecting each installed model. Studio
+loads capabilities only for the selected model and caches them until the next
+refresh, including when switching hosts. Their controls follow the same rules,
+based on the per-model capabilities Core reads from Ollama. Ollama reports no fixed thinking
 temperature, so the slider stays adjustable while thinking. For Ollama only,
 a collapsed **Advanced Settings** section holds **Ollama Context Size**:
 **Ollama default** (the default, which sends no `num_ctx`, so the server's

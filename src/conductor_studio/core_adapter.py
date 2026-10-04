@@ -64,6 +64,26 @@ BatchOutcome = NormalizedBatchResult | AdapterFailure
 ProgressCallback = Callable[[NormalizedBatchProgress], None]
 
 
+def ollama_model_list(*, host_address: str) -> list[str]:
+    """List installed names without inspecting model capabilities."""
+    from conductor_core.providers.ollama import get_model_list
+
+    return get_model_list(host_address=host_address)
+
+
+def ollama_model_status(
+    *, model_name: str, host_address: str, request_timeout: float
+) -> dict[str, Any]:
+    """Inspect only the selected model through the pinned Core API."""
+    from conductor_core.providers.ollama import get_model_status
+
+    return get_model_status(
+        model_name=model_name,
+        host_address=host_address,
+        request_timeout=request_timeout,
+    )
+
+
 def _safe(value: Any, limit: int = 500) -> str:
     text = str(value) if value is not None else ""
     for pattern in _SECRETS:

@@ -241,6 +241,9 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
 
 def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
     class Catalog:
+        def lookup(self, provider, model):
+            return next(item for item in self.models(provider) if item.model == model)
+
         def providers(self):
             return ("OpenAI", "Google")
 
@@ -532,6 +535,9 @@ class _OllamaCatalog(_Catalog):
                 "gpt-5", "effort", ("low", "high"), temp=False, off="lowest_effort"
             ),
         )
+
+    def lookup(self, provider, model):
+        return next(item for item in self.models(provider) if item.model == model)
 
     def refresh_ollama(self, host):
         self.hosts.append(host)
