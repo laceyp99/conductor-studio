@@ -110,7 +110,10 @@ def test_core_ollama_discovery_contract_matches_studio_loaders() -> None:
         variations_gen,
     )
 
-    assert list(signature(get_model_list).parameters) == ["host_address"]
+    assert list(signature(get_model_list).parameters) == [
+        "host_address",
+        "request_timeout",
+    ]
     assert list(signature(get_model_status).parameters) == [
         "model_name",
         "host_address",

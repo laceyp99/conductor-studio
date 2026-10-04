@@ -31,12 +31,13 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.6.0 from the immutable peeled commit below,
+Studio installs Conductor Core v0.6.0 with bounded discovery support from the
+immutable commit below,
 never from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-11f18591e4bb788180ca765f753d1b62b2380251
+070cf685dbf2392904a1cc132e2faf1c52b268b5
 ```
 
 ## Credentials and controls
@@ -82,7 +83,9 @@ Ollama models are discovered when the page loads and again on **Refresh Ollama
 models**. Discovery lists names without inspecting each installed model. Studio
 loads capabilities only for the selected model and caches them until the next
 refresh, including when switching hosts. Their controls follow the same rules,
-based on the per-model capabilities Core reads from Ollama. Ollama reports no fixed thinking
+based on the per-model capabilities Core reads from Ollama. Discovery and
+selected-model inspection both use a two-second request timeout by default.
+Ollama reports no fixed thinking
 temperature, so the slider stays adjustable while thinking. For Ollama only,
 a collapsed **Advanced Settings** section holds **Ollama Context Size**:
 **Ollama default** (the default, which sends no `num_ctx`, so the server's

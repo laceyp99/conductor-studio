@@ -478,7 +478,9 @@ class ModelCatalog:
             False, (), _safe_host_label(selected_host)
         )
         try:
-            raw_models = self._ollama_list_loader(host_address=selected_host)
+            raw_models = self._ollama_list_loader(
+                host_address=selected_host, request_timeout=self.ollama_timeout
+            )
         except Exception as exc:  # local readiness must never break cloud UI
             self._ollama_status = OllamaReadiness(
                 False,
