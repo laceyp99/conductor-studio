@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -358,3 +360,69 @@ def test_invalid_model_list_clears_previous_discovery(models):
         catalog.refresh_ollama()
     assert "Ollama" not in catalog.providers()
     assert catalog.ollama_status().models == ()
+
+
+@pytest.mark.parametrize("replacement", [("new",), ()])
+def test_control_selection_and_refresh_use_one_catalog_snapshot(replacement):
+    from conductor_studio.app import StudioController
+    from conductor_studio.credentials import CredentialStore
+
+    choices_read, continue_selection, refresh_started, refresh_done = (
+        Event(),
+        Event(),
+        Event(),
+        Event(),
+    )
+    calls = []
+
+    class Catalog(ModelCatalog):
+        def models(self, provider=None):
+            result = super().models(provider)
+            if provider == "Ollama" and not choices_read.is_set():
+                choices_read.set()
+                assert continue_selection.wait(5), "Selection did not resume"
+            return result
+
+    def inspect(*, model_name, host_address, **_):
+        calls.append((host_address, model_name))
+        return {"model_capabilities": {}}
+
+    catalog = Catalog(
+        model_info_loader=_info,
+        ollama_list_loader=lambda *, host_address: (
+            ("old",) if host_address == "http://old" else replacement
+        ),
+        ollama_model_loader=inspect,
+    )
+    catalog.refresh_ollama("http://old")
+    controller = StudioController(object(), catalog, CredentialStore({}), object())
+
+    def refresh():
+        refresh_started.set()
+        catalog.refresh_ollama("http://new")
+        refresh_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        selection = executor.submit(controller.control_view, "Ollama", "old")
+        try:
+            assert choices_read.wait(5), "Selection did not read choices"
+            refreshing = executor.submit(refresh)
+            assert refresh_started.wait(5), "Refresh did not start"
+            assert not refresh_done.wait(0.1), (
+                "Refresh replaced choices during selection"
+            )
+        finally:
+            continue_selection.set()
+        old_view = selection.result(timeout=5)
+        refreshing.result(timeout=5)
+
+    assert old_view.model_choices == ("old",)
+    assert old_view.model_value == "old"
+    assert calls == [("http://old", "old")]
+    # An event carrying the old selection after refresh chooses the new first
+    # model, or disables controls when the refreshed host has no models.
+    new_view = controller.control_view("Ollama", "old")
+    assert new_view.model_choices == replacement
+    assert new_view.model_value == (replacement[0] if replacement else None)
+    if not replacement:
+        assert not new_view.temperature_visible

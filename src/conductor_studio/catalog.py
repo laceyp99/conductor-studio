@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any
@@ -430,6 +431,20 @@ class ModelCatalog:
 
     get = lookup
     capability = lookup
+
+    def select_model(
+        self, provider: str, preferred: str | None = None
+    ) -> tuple[tuple[str, ...], ModelCapability | None]:
+        """Resolve UI choices and selected capabilities from one catalog snapshot."""
+        lock = (
+            self._ollama_lock
+            if self._canonical_provider(provider) == OLLAMA_PROVIDER
+            else nullcontext()
+        )
+        with lock:
+            choices = tuple(item.model for item in self.models(provider))
+            selected = preferred if preferred in choices else next(iter(choices), None)
+            return choices, self.lookup(provider, selected) if selected else None
 
     def _inspect_ollama(self, model: str) -> ModelCapability:
         if model not in self._ollama_capabilities:

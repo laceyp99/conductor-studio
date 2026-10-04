@@ -476,10 +476,8 @@ class StudioController:
         kept across models and shown unless the model fixes the temperature
         while thinking.
         """
-        capabilities = tuple(self.catalog.models(provider))
-        choices = tuple(item.model for item in capabilities)
-        selected = model if model in choices else (choices[0] if choices else None)
-        capability = self.catalog.lookup(provider, selected) if selected else None
+        choices, capability = self.catalog.select_model(provider, model)
+        selected = capability.model if capability else None
         if capability is None:
             return ControlView(
                 choices,
