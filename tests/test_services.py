@@ -26,6 +26,15 @@ def settings():
     return SessionSettings(prompt="steady pulse", provider="OpenAI", model="test-model")
 
 
+def test_favorite_write_is_blocked_during_background_work(tmp_path):
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(store=store)
+    service._active_session_id = "active-session"
+    # The busy check must happen before touching storage, even for a stale ID.
+    with pytest.raises(ActiveSessionError, match="favorites cannot change"):
+        service.set_favorite("stale-session", "01", True)
+
+
 class FakeAdapter:
     def __init__(self, root, credentials, *, outcome=None, gate=None):
         self.root = Path(root)

@@ -409,7 +409,14 @@ class StudioService:
         return self.store.favorites()
 
     def set_favorite(self, session_id, slot_id, favorite=None):
-        return self.store.set_favorite(session_id, slot_id, favorite)
+        # Match the UI busy restriction at the service boundary. Holding this
+        # lock prevents a generation/audio retry from starting mid-mutation.
+        with self._state_lock:
+            if self._active_session_id is not None:
+                raise ActiveSessionError(
+                    "favorites cannot change while Studio is working"
+                )
+            return self.store.set_favorite(session_id, slot_id, favorite)
 
     def move_to_trash(self, session_id):
         # Holding the state lock keeps a retry from starting mid-move.
