@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .catalog import DEFAULT_PROVIDER
+from .catalog import DEFAULT_PROVIDER, OllamaReadiness
 from .media import MediaPublisher
 from .models import (
     AudioState,
@@ -476,12 +476,8 @@ class StudioController:
         kept across models and shown unless the model fixes the temperature
         while thinking.
         """
-        capabilities = tuple(self.catalog.models(provider))
-        choices = tuple(item.model for item in capabilities)
-        selected = model if model in choices else (choices[0] if choices else None)
-        capability = next(
-            (item for item in capabilities if item.model == selected), None
-        )
+        choices, capability = self.catalog.select_model(provider, model)
+        selected = capability.model if capability else None
         if capability is None:
             return ControlView(
                 choices,
@@ -529,15 +525,14 @@ class StudioController:
             return False
         return _temperature_locked(capability, thinking, effort)
 
-    def refresh_ollama(self, host: str) -> tuple[ControlView, str]:
+    def refresh_ollama(self, host: str) -> tuple[OllamaReadiness, str]:
         # Discover models on the same host generation will use: a typed host
         # becomes the in-memory override, otherwise the saved override or
         # environment value applies.
         if host and host.strip():
             self.credentials.set_override("ollama", host)
         readiness = self.catalog.refresh_ollama(self.credentials.resolve("ollama"))
-        view = self.control_view("Ollama")
-        return view, (
+        return readiness, (
             f"Ollama ready · {len(readiness.models)} model(s) discovered."
             if readiness.available
             else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
@@ -1142,8 +1137,8 @@ def _ollama_values(
     """
     ollama, notice = controller.refresh_ollama(host)
     providers = tuple(controller.catalog.providers())
-    if select and ollama.model_choices:
-        selected, controls = "Ollama", ollama
+    if select and ollama.models:
+        selected, controls = "Ollama", controller.control_view("Ollama")
     elif current in providers:
         selected, controls = current, None
     else:

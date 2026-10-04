@@ -103,15 +103,26 @@ def test_core_variation_contract_is_available() -> None:
     assert method_signature.return_annotation is conductor_core.VariationBatchResult
 
 
-def test_core_ollama_status_contract_matches_studio_loader() -> None:
-    from conductor_core.providers.ollama import get_ollama_status, variations_gen
+def test_core_ollama_discovery_contract_matches_studio_loaders() -> None:
+    from conductor_core.providers.ollama import (
+        get_model_list,
+        get_model_status,
+        variations_gen,
+    )
 
-    assert list(signature(get_ollama_status).parameters) == [
+    assert list(signature(get_model_list).parameters) == [
         "host_address",
         "request_timeout",
     ]
-    offline = get_ollama_status(host_address="http://127.0.0.1:9", request_timeout=0.1)
-    assert {"available", "models", "model_capabilities", "host", "error"} <= set(
+    assert list(signature(get_model_status).parameters) == [
+        "model_name",
+        "host_address",
+        "request_timeout",
+    ]
+    offline = get_model_status(
+        "m", host_address="http://127.0.0.1:9", request_timeout=0.1
+    )
+    assert {"available", "installed", "model_capabilities", "host", "error"} <= set(
         offline
     )
     assert {"use_thinking", "effort", "model_capabilities"} <= set(
@@ -139,12 +150,12 @@ def test_core_metadata_and_offline_resources_load() -> None:
     assert all(
         config["thinking_off"] in {"disabled", "lowest_effort"} for config in thinking
     )
-    assert ModelCatalog(ollama_status_loader=lambda **_: {}).models()
+    assert ModelCatalog(ollama_list_loader=lambda **_: []).models()
     assert playback.get_default_soundfont()
 
 
 def test_pinned_metadata_yields_the_expected_reasoning_controls() -> None:
-    catalog = ModelCatalog(ollama_status_loader=lambda **_: {})
+    catalog = ModelCatalog(ollama_list_loader=lambda **_: [])
     modes = {
         (item.provider, item.model): item.control_mode for item in catalog.models()
     }

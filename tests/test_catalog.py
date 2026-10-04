@@ -1,3 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from types import SimpleNamespace
+
 import pytest
 
 from conductor_studio.catalog import CatalogError, ModelCatalog
@@ -102,21 +106,17 @@ def test_each_model_gets_one_way_to_choose_reasoning() -> None:
     assert catalog.lookup("Google", "switch").control_mode == "thinking"
 
 
-def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
+def test_ollama_refresh_lists_names_without_inspection() -> None:
     calls = []
 
     def loader(*, host_address, request_timeout):
         calls.append((host_address, request_timeout))
-        return {
-            "available": True,
-            "models": ["llama3", "llama3"],
-            "host": host_address,
-            "error": None,
-        }
+        return ["llama3", "llama3"]
 
     catalog = ModelCatalog(
         model_info_loader=_info,
-        ollama_status_loader=loader,
+        ollama_list_loader=loader,
+        ollama_model_loader=lambda **_: {"model_capabilities": None},
         ollama_timeout=1.25,
     )
     status = catalog.refresh_ollama("http://ollama")
@@ -131,37 +131,42 @@ def test_ollama_refresh_is_injected_and_passes_short_timeout() -> None:
 
 
 def test_ollama_controls_follow_core_model_capabilities() -> None:
-    def loader(**_):
-        return {
-            "available": True,
-            "models": ["plain", "toggle", "levels", "switchable", "uninspected"],
-            "model_capabilities": {
-                "plain": {"extended_thinking": False, "effort_options": []},
-                "toggle": {
-                    "extended_thinking": True,
-                    "effort_options": [],
-                    "temperature_supported": True,
-                    "thinking_fixed_temperature": None,
-                    "thinking_off": "disabled",
-                },
-                "levels": {
-                    "extended_thinking": True,
-                    "effort_options": ["low", "medium", "high"],
-                    "temperature_supported": True,
-                    "thinking_fixed_temperature": None,
-                    "thinking_off": "lowest_effort",
-                },
-                "switchable": {
-                    "extended_thinking": True,
-                    "effort_options": ["low", "high"],
-                    "thinking_off": "disabled",
-                },
+    def loader(*, model_name, **_):
+        capabilities = {
+            "plain": {"extended_thinking": False, "effort_options": []},
+            "toggle": {
+                "extended_thinking": True,
+                "effort_options": [],
+                "temperature_supported": True,
+                "thinking_fixed_temperature": None,
+                "thinking_off": "disabled",
             },
-            "host": "http://ollama",
-            "error": None,
+            "levels": {
+                "extended_thinking": True,
+                "effort_options": ["low", "medium", "high"],
+                "temperature_supported": True,
+                "thinking_fixed_temperature": None,
+                "thinking_off": "lowest_effort",
+            },
+            "switchable": {
+                "extended_thinking": True,
+                "effort_options": ["low", "high"],
+                "thinking_off": "disabled",
+            },
         }
+        return {"model_capabilities": capabilities.get(model_name)}
 
-    catalog = ModelCatalog(model_info_loader=_info, ollama_status_loader=loader)
+    catalog = ModelCatalog(
+        model_info_loader=_info,
+        ollama_list_loader=lambda **_: [
+            "plain",
+            "toggle",
+            "levels",
+            "switchable",
+            "uninspected",
+        ],
+        ollama_model_loader=loader,
+    )
     catalog.refresh_ollama()
 
     assert catalog.lookup("Ollama", "plain").control_mode == "temperature"
@@ -185,34 +190,34 @@ def test_ollama_controls_follow_core_model_capabilities() -> None:
     "capabilities",
     [
         [],
-        {"m": "thinking"},
-        {"m": {"extended_thinking": "yes"}},
-        {"m": {"extended_thinking": False, "effort_options": ["low"]}},
-        {"m": {"extended_thinking": False, "thinking_off": "disabled"}},
-        {"m": {"extended_thinking": True, "thinking_off": "sometimes"}},
-        {"m": {"thinking_fixed_temperature": -1}},
-        {"m": {"thinking_fixed_temperature": 2.5}},
-        {"m": {"temperature_supported": False, "thinking_fixed_temperature": 1.0}},
+        "thinking",
+        {"extended_thinking": "yes"},
+        {"extended_thinking": False, "effort_options": ["low"]},
+        {"extended_thinking": False, "thinking_off": "disabled"},
+        {"extended_thinking": True, "thinking_off": "sometimes"},
+        {"thinking_fixed_temperature": -1},
+        {"thinking_fixed_temperature": 2.5},
+        {"temperature_supported": False, "thinking_fixed_temperature": 1.0},
     ],
 )
 def test_malformed_ollama_capabilities_fail_closed(capabilities) -> None:
     catalog = ModelCatalog(
         model_info_loader=_info,
-        ollama_status_loader=lambda **_: {
-            "available": True,
-            "models": ["m"],
+        ollama_list_loader=lambda **_: ["m"],
+        ollama_model_loader=lambda **_: {
             "model_capabilities": capabilities,
             "error": None,
         },
     )
+    catalog.refresh_ollama()
     with pytest.raises(CatalogError):
-        catalog.refresh_ollama()
+        catalog.lookup("Ollama", "m")
 
 
 def test_unreachable_ollama_is_nonfatal_and_has_no_models() -> None:
     catalog = ModelCatalog(
         model_info_loader=_info,
-        ollama_status_loader=lambda **_: (_ for _ in ()).throw(TimeoutError("offline")),
+        ollama_list_loader=lambda **_: (_ for _ in ()).throw(TimeoutError("offline")),
     )
     status = catalog.refresh_ollama()
     assert status.available is False
@@ -260,3 +265,195 @@ def test_provider_and_model_must_be_separate_exact_lookups() -> None:
         catalog.lookup("OpenAI", "gemini")
     with pytest.raises(CatalogError):
         catalog.lookup("gpt-4.1", "gpt-4.1")
+
+
+def test_core_discovery_inspects_only_selection_and_refresh_invalidates_cache(
+    monkeypatch,
+):
+    from conductor_core.providers import ollama
+
+    from conductor_studio.app import StudioController
+    from conductor_studio.credentials import CredentialStore
+
+    calls = []
+
+    class Client:
+        def __init__(self, host):
+            self.host = host
+
+        def list(self):
+            calls.append((self.host, "list"))
+            return SimpleNamespace(
+                models=[SimpleNamespace(model=m) for m in ("plain", "thinker")]
+            )
+
+        def show(self, model):
+            calls.append((self.host, "show", model))
+            return SimpleNamespace(
+                capabilities=["thinking"] if model == "thinker" else [],
+                thinking={"values": [False, "low", "high"]},
+            )
+
+    def initialize(*, host_address, timeout=None):
+        assert timeout == 1.25
+        return Client(host_address)
+
+    monkeypatch.setattr(ollama, "initialize_ollama_client", initialize)
+    catalog = ModelCatalog(model_info_loader=_info, ollama_timeout=1.25)
+    controller = StudioController(object(), catalog, CredentialStore({}), object())
+    controller.refresh_ollama("http://one")
+    assert calls == [("http://one", "list")]
+    assert len(catalog.models("Ollama")) == 2
+    assert calls == [("http://one", "list")]
+
+    view = controller.control_view("Ollama", "thinker")
+    assert view.mode == "effort"
+    assert view.effort_choices == ("none", "low", "high")
+    assert [call for call in calls if call[1] == "show"] == [
+        ("http://one", "show", "thinker")
+    ]
+    before = list(calls)
+    controller.control_view("Ollama", "thinker")
+    catalog.lookup("ollama", "thinker")
+    assert calls == before
+    controller.control_view("Ollama", "plain")
+    assert calls[-1] == ("http://one", "show", "plain")
+    controller.refresh_ollama("http://one")
+    controller.control_view("Ollama", "thinker")
+    assert calls.count(("http://one", "show", "thinker")) == 2
+    controller.refresh_ollama("http://two")
+    controller.control_view("Ollama", "thinker")
+    assert calls[-1] == ("http://two", "show", "thinker")
+
+
+def test_inspection_failure_is_cached_without_breaking_cloud_controls():
+    calls = []
+
+    def inspect(**kwargs):
+        calls.append(kwargs["model_name"])
+        raise TimeoutError("private provider error")
+
+    catalog = ModelCatalog(
+        model_info_loader=_info,
+        ollama_list_loader=lambda **_: ["m"],
+        ollama_model_loader=inspect,
+    )
+    catalog.refresh_ollama()
+    assert catalog.lookup("Ollama", "m").control_mode == "temperature"
+    catalog.lookup("Ollama", "m")
+    assert calls == ["m"]
+    assert catalog.lookup("OpenAI", "gpt-5").control_mode == "effort"
+    catalog.refresh_ollama()
+    catalog.lookup("Ollama", "m")
+    assert calls == ["m", "m"]
+
+
+@pytest.mark.parametrize("timeout", [2.0, 1.25])
+def test_discovery_bounds_the_actual_http_request(monkeypatch, timeout):
+    import httpx
+    from conductor_core.providers import ollama
+
+    requests = []
+    client_type = ollama.ollama.Client
+
+    def stalled_server(request):
+        requests.append(request)
+        raise httpx.ReadTimeout("stalled discovery", request=request)
+
+    monkeypatch.setattr(
+        ollama.ollama,
+        "Client",
+        lambda **kwargs: client_type(
+            **kwargs, transport=httpx.MockTransport(stalled_server)
+        ),
+    )
+    catalog = ModelCatalog(model_info_loader=_info, ollama_timeout=timeout)
+
+    status = catalog.refresh_ollama("http://ollama.test")
+
+    assert status.available is False
+    assert status.models == ()
+    assert [request.url.path for request in requests] == ["/api/tags"]
+    assert requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), timeout
+    )
+    assert catalog.lookup("OpenAI", "gpt-5").control_mode == "effort"
+
+
+@pytest.mark.parametrize("models", ["m", None, {}, [""], [42]])
+def test_invalid_model_list_clears_previous_discovery(models):
+    catalog = ModelCatalog(
+        model_info_loader=_info, ollama_list_loader=lambda **_: ["m"]
+    )
+    catalog.refresh_ollama()
+    catalog._ollama_list_loader = lambda **_: models
+    with pytest.raises(CatalogError):
+        catalog.refresh_ollama()
+    assert "Ollama" not in catalog.providers()
+    assert catalog.ollama_status().models == ()
+
+
+@pytest.mark.parametrize("replacement", [("new",), ()])
+def test_control_selection_and_refresh_use_one_catalog_snapshot(replacement):
+    from conductor_studio.app import StudioController
+    from conductor_studio.credentials import CredentialStore
+
+    choices_read, continue_selection, refresh_started, refresh_done = (
+        Event(),
+        Event(),
+        Event(),
+        Event(),
+    )
+    calls = []
+
+    class Catalog(ModelCatalog):
+        def models(self, provider=None):
+            result = super().models(provider)
+            if provider == "Ollama" and not choices_read.is_set():
+                choices_read.set()
+                assert continue_selection.wait(5), "Selection did not resume"
+            return result
+
+    def inspect(*, model_name, host_address, **_):
+        calls.append((host_address, model_name))
+        return {"model_capabilities": {}}
+
+    catalog = Catalog(
+        model_info_loader=_info,
+        ollama_list_loader=lambda *, host_address, request_timeout: (
+            ("old",) if host_address == "http://old" else replacement
+        ),
+        ollama_model_loader=inspect,
+    )
+    catalog.refresh_ollama("http://old")
+    controller = StudioController(object(), catalog, CredentialStore({}), object())
+
+    def refresh():
+        refresh_started.set()
+        catalog.refresh_ollama("http://new")
+        refresh_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        selection = executor.submit(controller.control_view, "Ollama", "old")
+        try:
+            assert choices_read.wait(5), "Selection did not read choices"
+            refreshing = executor.submit(refresh)
+            assert refresh_started.wait(5), "Refresh did not start"
+            assert not refresh_done.wait(0.1), (
+                "Refresh replaced choices during selection"
+            )
+        finally:
+            continue_selection.set()
+        old_view = selection.result(timeout=5)
+        refreshing.result(timeout=5)
+
+    assert old_view.model_choices == ("old",)
+    assert old_view.model_value == "old"
+    assert calls == [("http://old", "old")]
+    # An event carrying the old selection after refresh chooses the new first
+    # model, or disables controls when the refreshed host has no models.
+    new_view = controller.control_view("Ollama", "old")
+    assert new_view.model_choices == replacement
+    assert new_view.model_value == (replacement[0] if replacement else None)
+    if not replacement:
+        assert not new_view.temperature_visible

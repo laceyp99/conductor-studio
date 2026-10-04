@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 from urllib.parse import urlsplit
 
 from conductor_core import music
+
+from .core_adapter import ollama_model_list, ollama_model_status
 
 CORE_CLOUD_PROVIDERS = ("OpenAI", "Google", "Anthropic")
 OLLAMA_PROVIDER = "Ollama"
@@ -276,8 +279,7 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
 def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
     """Map Core's per-model Ollama capabilities onto Studio controls.
 
-    A model without Core capability data (inspection failed, or an older
-    loader) stays temperature-only rather than guessing thinking support.
+    A model without Core capability data (inspection failed) stays temperature-only rather than guessing thinking support.
     """
     if raw is None:
         raw = {}
@@ -319,50 +321,6 @@ def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
     )
 
 
-def _default_ollama_loader(**kwargs: Any) -> Mapping[str, Any]:
-    from conductor_core.providers.ollama import get_ollama_status
-
-    return get_ollama_status(**kwargs)
-
-
-def _invoke_loader(loader: Callable[..., Any], host: str, timeout: float) -> Any:
-    """Pass only parameters accepted by an injected loader."""
-    try:
-        signature = inspect.signature(loader)
-        parameters = signature.parameters
-        accepts_kwargs = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-    except (TypeError, ValueError):
-        accepts_kwargs = True
-        parameters = {}
-    # These are exactly the parameters of the pinned Core
-    # ``get_ollama_status``; a contract test guards the match.  Aliases are
-    # useful only for narrow injected test/application loaders with an
-    # explicit signature; never send them to a ``**kwargs`` loader because it
-    # may forward unknown names to Core.
-    candidates = {
-        "host_address": host,
-        "request_timeout": timeout,
-    }
-    if accepts_kwargs:
-        return loader(**candidates)
-    aliases = {"host": host, "timeout": timeout}
-    accepted = {
-        key: value
-        for key, value in {**candidates, **aliases}.items()
-        if key in parameters
-    }
-    # If a test/application loader exposes both canonical and alias names,
-    # prefer the Core names and avoid passing duplicate values.
-    if "host_address" in parameters:
-        accepted.pop("host", None)
-    if "request_timeout" in parameters:
-        accepted.pop("timeout", None)
-    return loader(**accepted)
-
-
 def _safe_host_label(value: str) -> str:
     """Return an origin-only host label without userinfo, query, or fragments."""
     try:
@@ -381,7 +339,8 @@ class ModelCatalog:
     def __init__(
         self,
         model_info_loader: Callable[[], Mapping[str, Any]] | None = None,
-        ollama_status_loader: Callable[..., Mapping[str, Any]] | None = None,
+        ollama_list_loader: Callable[..., Sequence[str]] | None = None,
+        ollama_model_loader: Callable[..., Mapping[str, Any]] | None = None,
         ollama_timeout: float = DEFAULT_OLLAMA_TIMEOUT,
     ) -> None:
         if isinstance(ollama_timeout, bool) or not isinstance(
@@ -391,7 +350,11 @@ class ModelCatalog:
         if ollama_timeout <= 0:
             raise ValueError("ollama_timeout must be a positive number")
         self._model_info_loader = model_info_loader or music.get_model_info
-        self._ollama_status_loader = ollama_status_loader or _default_ollama_loader
+        self._ollama_list_loader = ollama_list_loader or ollama_model_list
+        self._ollama_model_loader = ollama_model_loader or ollama_model_status
+        self._ollama_lock = RLock()
+        self._ollama_host = DEFAULT_OLLAMA_HOST
+        self._ollama_capabilities: dict[str, ModelCapability] = {}
         self.ollama_timeout = float(ollama_timeout)
         self._cloud: dict[str, tuple[ModelCapability, ...]] = {}
         self._ollama: tuple[ModelCapability, ...] = ()
@@ -424,6 +387,7 @@ class ModelCatalog:
     provider_choices = providers
 
     def models(self, provider: str | None = None) -> tuple[ModelCapability, ...]:
+        """List choices without network access; use lookup for Ollama capabilities."""
         if provider is None:
             return (
                 tuple(item for values in self._cloud.values() for item in values)
@@ -455,22 +419,69 @@ class ModelCatalog:
         """Look up by separate exact provider and model IDs."""
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be a nonblank string")
-        for candidate in self.models(provider):
-            if candidate.model == model:
-                return candidate
+        if self._canonical_provider(provider) == OLLAMA_PROVIDER:
+            with self._ollama_lock:
+                if model in self._ollama_status.models:
+                    return self._inspect_ollama(model)
+        else:
+            for candidate in self.models(provider):
+                if candidate.model == model:
+                    return candidate
         raise CatalogError(f"unknown model for provider {provider}: {model}")
 
     get = lookup
     capability = lookup
 
+    def select_model(
+        self, provider: str, preferred: str | None = None
+    ) -> tuple[tuple[str, ...], ModelCapability | None]:
+        """Resolve UI choices and selected capabilities from one catalog snapshot."""
+        lock = (
+            self._ollama_lock
+            if self._canonical_provider(provider) == OLLAMA_PROVIDER
+            else nullcontext()
+        )
+        with lock:
+            choices = tuple(item.model for item in self.models(provider))
+            selected = preferred if preferred in choices else next(iter(choices), None)
+            return choices, self.lookup(provider, selected) if selected else None
+
+    def _inspect_ollama(self, model: str) -> ModelCapability:
+        if model not in self._ollama_capabilities:
+            try:
+                status = self._ollama_model_loader(
+                    model_name=model,
+                    host_address=self._ollama_host,
+                    request_timeout=self.ollama_timeout,
+                )
+            except Exception:
+                # Preserve the existing temperature-only fallback on inspection
+                # failure. Cache it too; an explicit refresh allows another try.
+                status = {"model_capabilities": None}
+            if not isinstance(status, Mapping):
+                raise CatalogError("Ollama model status must be an object")
+            self._ollama_capabilities[model] = _normalize_ollama_model(
+                model, status.get("model_capabilities")
+            )
+        return self._ollama_capabilities[model]
+
     def refresh_ollama(self, host: str | None = None) -> OllamaReadiness:
-        selected_host = host or DEFAULT_OLLAMA_HOST
+        """List names only; invalidate capability data on every explicit refresh."""
+        with self._ollama_lock:
+            return self._refresh_ollama(host or DEFAULT_OLLAMA_HOST)
+
+    def _refresh_ollama(self, selected_host: str) -> OllamaReadiness:
+        self._ollama_host = selected_host
+        self._ollama_capabilities.clear()
+        self._ollama = ()
+        self._ollama_status = OllamaReadiness(
+            False, (), _safe_host_label(selected_host)
+        )
         try:
-            raw_status = _invoke_loader(
-                self._ollama_status_loader, selected_host, self.ollama_timeout
+            raw_models = self._ollama_list_loader(
+                host_address=selected_host, request_timeout=self.ollama_timeout
             )
         except Exception as exc:  # local readiness must never break cloud UI
-            self._ollama = ()
             self._ollama_status = OllamaReadiness(
                 False,
                 (),
@@ -478,39 +489,24 @@ class ModelCatalog:
                 f"Ollama readiness failed ({type(exc).__name__}).",
             )
             return self._ollama_status
-        if not isinstance(raw_status, Mapping):
-            raise CatalogError("Ollama status must be an object")
-        available = raw_status.get("available")
-        raw_models = raw_status.get("models", ())
-        if (
-            not isinstance(available, bool)
-            or not isinstance(raw_models, Sequence)
-            or isinstance(raw_models, (str, bytes))
-        ):
-            raise CatalogError("Ollama status has invalid availability or models")
+        if not isinstance(raw_models, Sequence) or isinstance(raw_models, (str, bytes)):
+            raise CatalogError("Ollama models must be a sequence")
         model_ids: list[str] = []
         for model in raw_models:
             if not isinstance(model, str) or not model.strip():
                 raise CatalogError("Ollama model IDs must be nonblank strings")
             if model not in model_ids:
                 model_ids.append(model)
-        raw_capabilities = raw_status.get("model_capabilities")
-        if raw_capabilities is None:
-            raw_capabilities = {}
-        if not isinstance(raw_capabilities, Mapping):
-            raise CatalogError("Ollama model_capabilities must be an object")
-        error = raw_status.get("error")
-        if error is not None and not isinstance(error, str):
-            raise CatalogError("Ollama status error must be a string or null")
         self._ollama_status = OllamaReadiness(
-            available=available,
-            models=tuple(model_ids) if available else (),
-            host=_safe_host_label(str(raw_status.get("host") or selected_host)),
-            error="Ollama is unavailable at the configured host." if error else None,
+            available=bool(model_ids),
+            models=tuple(model_ids),
+            host=_safe_host_label(selected_host),
+            error=None
+            if model_ids
+            else "No Ollama models found at the configured host.",
         )
         self._ollama = tuple(
-            _normalize_ollama_model(model, raw_capabilities.get(model))
-            for model in self._ollama_status.models
+            _normalize_ollama_model(model, None) for model in model_ids
         )
         return self._ollama_status
 

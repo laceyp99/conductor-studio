@@ -42,6 +42,12 @@ from conductor_studio.variation import create_manifest
 
 
 class _Catalog:
+    def select_model(self, provider, preferred=None):
+        models = self.models(provider)
+        choices = tuple(item.model for item in models)
+        selected = preferred if preferred in choices else next(iter(choices), None)
+        return choices, next((item for item in models if item.model == selected), None)
+
     def providers(self):
         return ("OpenAI",)
 
@@ -240,7 +246,10 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
 
 
 def test_create_app_opens_on_the_newest_google_model(tmp_path: Path):
-    class Catalog:
+    class Catalog(_Catalog):
+        def lookup(self, provider, model):
+            return next(item for item in self.models(provider) if item.model == model)
+
         def providers(self):
             return ("OpenAI", "Google")
 
@@ -485,7 +494,7 @@ def _capability(
     )
 
 
-class _ControlCatalog:
+class _ControlCatalog(_Catalog):
     def __init__(self):
         self.items = {
             "temp-a": _capability("temp-a"),
@@ -532,6 +541,9 @@ class _OllamaCatalog(_Catalog):
                 "gpt-5", "effort", ("low", "high"), temp=False, off="lowest_effort"
             ),
         )
+
+    def lookup(self, provider, model):
+        return next(item for item in self.models(provider) if item.model == model)
 
     def refresh_ollama(self, host):
         self.hosts.append(host)
