@@ -106,7 +106,9 @@ class MediaPublisher:
             ("audio", artifacts.audio),
             ("midi", artifacts.midi),
         ):
-            with suppress(ContainmentError):
+            # One unavailable artifact must not hide the other usable media.
+            # Files can disappear between containment validation and copying.
+            with suppress(ContainmentError, OSError):
                 published[kind] = self.publish_path(
                     store, manifest.session_id, slot.slot_id, relative_path
                 )

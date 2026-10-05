@@ -69,3 +69,27 @@ def test_publish_slot_does_not_expose_invalid_core_metadata(tmp_path: Path):
         "audio": None,
         "midi": None,
     }
+
+
+def test_publish_slot_isolates_copy_failure_and_keeps_other_media(
+    tmp_path, monkeypatch
+):
+    store, manifest, publisher = setup_media(tmp_path)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/piano-roll.png"
+    slot.artifacts.midi = "core/generations/gen-1/loop.mid"
+    path = store.session_dir(manifest.session_id) / slot.artifacts.midi
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"midi")
+    original = publisher.publish_path
+
+    def publish(*args):
+        if args[-1] == slot.artifacts.piano_roll:
+            raise OSError("image disappeared while copying")
+        return original(*args)
+
+    monkeypatch.setattr(publisher, "publish_path", publish)
+    result = publisher.publish_slot(store, manifest, slot)
+    assert result["piano_roll"] is None
+    assert result["audio"] is None
+    assert result["midi"].read_bytes() == b"midi"

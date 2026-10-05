@@ -43,6 +43,13 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 .thinking-toggle .info-text { order:-1; margin:0; color:var(--block-title-text-color); font-size:var(--block-title-text-size); font-weight:var(--block-title-text-weight); }
 .thinking-toggle .checkbox-container { border:1px solid var(--input-border-color); border-radius:var(--input-radius); background:var(--input-background-fill); padding:var(--input-padding); box-shadow:var(--input-shadow); cursor:pointer; }
 @media (max-width:820px) { #variant-grid { grid-template-columns:minmax(0,1fr) !important; } }
+#favorites-layout { display:flex !important; flex-direction:row !important; align-items:flex-start; gap:1rem; }
+#favorites-main { min-width:0 !important; flex:3 !important; }
+#favorites-sidebar { min-width:240px !important; flex:1 !important; flex-wrap:nowrap !important; max-height:640px; overflow-y:auto; border:1px solid var(--studio-line); border-radius:14px; padding:.7rem; }
+#favorites-sidebar > * { flex-shrink:0; }
+#favorites-sidebar label { white-space:normal !important; overflow-wrap:anywhere; }
+#favorites-sidebar label:has(input:checked) { border:2px solid #91bfff !important; background:#263c59 !important; font-weight:700; }
+@media (max-width:600px) { #favorites-layout { flex-direction:column-reverse !important; } #favorites-sidebar { width:100% !important; max-height:210px; } }
 """
 
 
@@ -59,6 +66,7 @@ class CardView:
     warning: str
     favorite_label: str
     audio_retry_visible: bool
+    favorite_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,6 +84,28 @@ class LibraryView:
     history_choices: tuple[tuple[str, str], ...] = ()
     favorite_choices: tuple[tuple[str, str], ...] = ()
     notice: str = ""
+
+
+@dataclass(frozen=True)
+class FavoritesView:
+    choices: tuple[tuple[str, str], ...]
+    selection: str | None
+    card: CardView | None
+    title: str = "No favorite loops yet."
+    notice: str = ""
+
+
+def favorite_eligible(manifest: SessionManifest, slot: VariantSlot, store: Any) -> bool:
+    """A favorite can be added only when its saved MIDI remains accessible."""
+    if slot.state is not SlotState.SUCCEEDED or slot.midi is not MidiState.READY:
+        return False
+    if not slot.artifacts.midi:
+        return False
+    try:
+        store.artifact_path(manifest.session_id, slot.artifacts.midi)
+    except (ContainmentError, StorageError, OSError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -144,7 +174,10 @@ def _context_window(value: Any) -> int | None:
 
 
 def _card_view(
-    manifest: SessionManifest, slot: VariantSlot, published: dict[str, Path | None]
+    manifest: SessionManifest,
+    slot: VariantSlot,
+    published: dict[str, Path | None],
+    store: Any | None = None,
 ) -> CardView:
     progress = slot.progress
     fraction = (
@@ -163,6 +196,17 @@ def _card_view(
     warnings = [*slot.warnings]
     if slot.audio.failure:
         warnings.append(slot.audio.failure.message)
+    unavailable = [
+        label
+        for kind, label, ref in (
+            ("piano_roll", "piano roll", slot.artifacts.piano_roll),
+            ("audio", "audio preview", slot.artifacts.audio),
+            ("midi", "MIDI", slot.artifacts.midi),
+        )
+        if ref and not published.get(kind)
+    ]
+    if unavailable:
+        warnings.append(f"Unavailable: {', '.join(unavailable)}.")
     retry_audio = (
         slot.midi is MidiState.READY
         and slot.audio.state
@@ -181,6 +225,7 @@ def _card_view(
         "\n".join(dict.fromkeys(warnings)),
         "★ Favorited" if slot.favorite else "☆ Favorite",
         retry_audio,
+        slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
     )
 
 
@@ -215,7 +260,7 @@ def _view_for_manifest(
         if publisher and store:
             with suppress(Exception):
                 published = publisher.publish_slot(store, manifest, slot)
-        cards.append(_card_view(manifest, slot, published))
+        cards.append(_card_view(manifest, slot, published, store))
     return AppView(
         manifest.session_id,
         tuple(cards),
@@ -386,10 +431,101 @@ class StudioController:
                 notice=_audio_retry_notice(error),
             )
 
-    def toggle_favorite(self, session_id: str, slot_id: str) -> AppView:
+    def toggle_favorite(self, session_id: str | None, slot_id: str) -> AppView:
+        from .services import ActiveSessionError
+
+        notice = ""
+        try:
+            if not session_id or self.service.generation_active:
+                raise ValueError("No available session")
+            manifest = self.service.store.load(session_id)
+            slot = manifest.slot(slot_id)
+            if not slot.favorite and not favorite_eligible(
+                manifest, slot, self.service.store
+            ):
+                raise ValueError("MIDI unavailable")
+            manifest = self.service.set_favorite(session_id, slot_id)
+        except (
+            ValueError,
+            KeyError,
+            StorageError,
+            ContainmentError,
+            ActiveSessionError,
+            OSError,
+        ):
+            notice = "This loop cannot be favorited right now. Refresh the library and try again."
+            try:
+                manifest = self.service.store.load(session_id) if session_id else None
+            except (StorageError, ContainmentError, OSError):
+                manifest = None
+        if manifest is None:
+            return AppView(
+                None,
+                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
+                not self.service.generation_active,
+                notice,
+            )  # type: ignore[arg-type]
         return self._view(
-            self.service.set_favorite(session_id, slot_id),
-            enabled=not self.service.generation_active,
+            manifest, enabled=not self.service.generation_active, notice=notice
+        )
+
+    def favorites_view(
+        self,
+        selection: str | None = None,
+        previous: tuple[str, ...] | tuple[tuple[str, str], ...] = (),
+        *,
+        entering: bool = False,
+        notice: str = "",
+    ) -> FavoritesView:
+        favorites = self.service.favorites()
+        choices = tuple(
+            (
+                f"{m.title} · Variant {int(slot)} · {m.created_at:%Y-%m-%d %H:%M}",
+                f"{m.session_id}|{slot}",
+            )
+            for m, slot in favorites
+        )
+        identities = tuple(value for _, value in choices)
+        previous = tuple(
+            item[1] if isinstance(item, tuple) else item for item in previous
+        )
+        if entering:
+            selection = None
+        if selection not in identities:
+            if selection in previous:
+                old_index = previous.index(selection)
+                selection = next(
+                    (item for item in previous[old_index + 1 :] if item in identities),
+                    None,
+                ) or next(
+                    (
+                        item
+                        for item in reversed(previous[:old_index])
+                        if item in identities
+                    ),
+                    None,
+                )
+            selection = (
+                selection if selection in identities else next(iter(identities), None)
+            )
+        if selection is None:
+            return FavoritesView(
+                choices, None, None, notice=notice or "No favorite loops yet."
+            )
+        manifest, slot_id = next(
+            (m, slot) for m, slot in favorites if f"{m.session_id}|{slot}" == selection
+        )
+        slot = manifest.slot(slot_id)
+        published = {"piano_roll": None, "audio": None, "midi": None}
+        with suppress(Exception):
+            published = self.publisher.publish_slot(self.service.store, manifest, slot)
+        card = _card_view(manifest, slot, published, self.service.store)
+        return FavoritesView(
+            choices,
+            selection,
+            card,
+            f"### {manifest.title} · Variant {int(slot_id)}\n{manifest.created_at:%Y-%m-%d %H:%M} · {_slot_metadata(manifest)}",
+            notice,
         )
 
     def reopen(self, session_id: str) -> AppView:
@@ -578,7 +714,10 @@ def _view_values(view: AppView) -> list[Any]:
                 card.image_path,
                 card.audio_path,
                 _update(card.midi_path, visible=bool(card.midi_path)),
-                _update(card.favorite_label, interactive=view.generate_enabled),
+                _update(
+                    card.favorite_label,
+                    interactive=view.generate_enabled and card.favorite_enabled,
+                ),
                 _update(
                     "Retry audio",
                     visible=card.audio_retry_visible,
@@ -603,7 +742,7 @@ def _audio_retry_callback(
     # Gradio streams only when the callback itself is a generator function.
     def retry(session_id: str) -> Iterator[list[Any]]:
         for view in controller.retry_audio(session_id, slot_id):
-            yield _view_values(view)
+            yield [*_view_values(view), f"{session_id}|{slot_id}"]
 
     return retry
 
@@ -613,6 +752,26 @@ def _library_values(view: LibraryView) -> tuple[Any, Any, str]:
         _update(choices=list(view.history_choices)),
         _update(choices=list(view.favorite_choices)),
         view.notice,
+    )
+
+
+def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
+    card = view.card
+    return (
+        _update(choices=list(view.choices), value=view.selection),
+        view.selection,
+        tuple(value for _, value in view.choices),
+        view.title,
+        _update(card.warning if card else "", visible=bool(card and card.warning)),
+        card.image_path if card else None,
+        card.audio_path if card else None,
+        _update(
+            card.midi_path if card else None, visible=bool(card and card.midi_path)
+        ),
+        _update(interactive=bool(card)),
+        _update(interactive=bool(card)),
+        view.notice,
+        card.audio_path if card else None,
     )
 
 
@@ -694,11 +853,26 @@ def _exclusive_audio_js(slot_id: str) -> str:
                 if (element.shadowRoot) updateAudio(element.shadowRoot, restart);
             });
         };
-        document.querySelectorAll("#variant-grid .variant-audio").forEach(player => {
-            updateAudio(player, player.id === "variant-audio-SLOT");
+        document.querySelectorAll("#variant-grid .variant-audio, #favorite-audio").forEach(player => {
+            updateAudio(player, player.id === "SELECTED");
         });
         return [];
-    }""".replace("SLOT", slot_id)
+    }""".replace(
+        "SELECTED",
+        "favorite-audio" if slot_id == "favorite" else f"variant-audio-{slot_id}",
+    )
+
+
+_PAUSE_AUDIO_JS = """(...args) => {
+    const pause = root => {
+        root.querySelectorAll('audio').forEach(audio => audio.pause());
+        root.querySelectorAll('*').forEach(element => {
+            if (element.shadowRoot) pause(element.shadowRoot);
+        });
+    };
+    pause(document);
+    return args;
+}"""
 
 
 def create_app(
@@ -762,6 +936,10 @@ def create_app(
                 "# Conductor Studio\n### Four ideas. One prompt. Pick the one that moves."
             )
             active_session = gr.State(None)
+            favorite_selection = gr.State(None)
+            favorite_order = gr.State(())
+            favorite_audio_path = gr.State(None)
+            audio_retry_selection = gr.State(None)
             control_mode = gr.State(controls.mode)
             requested_temperature = gr.State(controls.requested_temperature)
             with gr.Tabs(selected="generate") as tabs:
@@ -848,9 +1026,50 @@ def create_app(
                         open_history = gr.Button("Open session")
                         trash = gr.Button("Move to trash", variant="stop")
                     history_notice = gr.Markdown()
-                with gr.Tab("Favorites", id="favorites") as favorites_tab:
-                    favorite_choice = gr.Dropdown(label="Favorite variants", choices=())
-                    open_favorite = gr.Button("Open favorite")
+                with (
+                    gr.Tab("Favorites", id="favorites") as favorites_tab,
+                    gr.Row(elem_id="favorites-layout"),
+                ):
+                    with gr.Column(elem_id="favorites-main", scale=3):
+                        favorite_title = gr.Markdown("No favorite loops yet.")
+                        favorite_warning = gr.Markdown(visible=False)
+                        favorite_image = gr.Image(
+                            type="filepath",
+                            interactive=False,
+                            buttons=["download", "fullscreen"],
+                            height=300,
+                            label="Favorite piano roll",
+                            elem_classes=["piano-roll"],
+                        )
+                        favorite_audio = gr.Audio(
+                            type="filepath",
+                            interactive=False,
+                            loop=True,
+                            buttons=["download"],
+                            label="Favorite audio preview",
+                            elem_id="favorite-audio",
+                        )
+                        favorite_audio.play(
+                            fn=None,
+                            js=_exclusive_audio_js("favorite"),
+                            queue=False,
+                            api_visibility="private",
+                        )
+                        with gr.Row():
+                            favorite_midi = gr.DownloadButton(
+                                "Download MIDI", visible=False
+                            )
+                            unfavorite = gr.Button("★ Unfavorite", interactive=False)
+                            source_session = gr.Button(
+                                "Open source session", interactive=False
+                            )
+                        favorite_notice = gr.Markdown()
+                    with gr.Column(elem_id="favorites-sidebar", scale=1):
+                        gr.Markdown("### Favorite loops")
+                        favorite_choice = gr.Radio(
+                            label="Select a favorite loop",
+                            choices=(),
+                        )
                 with gr.Tab("Settings", id="settings") as settings_tab:
                     gr.Markdown(
                         "Credentials stay in process memory and are never written to session manifests."
@@ -927,7 +1146,7 @@ def create_app(
             effort,
             context_window,
         ]
-        generate.click(
+        generate_event_handle = generate.click(
             generate_event,
             generation_inputs,
             app_outputs,
@@ -936,7 +1155,7 @@ def create_app(
             api_visibility="private",
             show_progress="minimal",
         )
-        prompt.submit(
+        prompt_event_handle = prompt.submit(
             generate_event,
             generation_inputs,
             app_outputs,
@@ -944,22 +1163,93 @@ def create_app(
             concurrency_id="generation",
             api_visibility="private",
         )
+        favorite_outputs = [
+            favorite_choice,
+            favorite_selection,
+            favorite_order,
+            favorite_title,
+            favorite_warning,
+            favorite_image,
+            favorite_audio,
+            favorite_midi,
+            unfavorite,
+            source_session,
+            favorite_notice,
+            favorite_audio_path,
+        ]
+
+        def refreshed_favorites(
+            selected: str | None,
+            previous: tuple[str, ...],
+            audio_path: str | None = None,
+            *,
+            entering: bool = False,
+            notice: str = "",
+            preserve_audio: bool = False,
+        ) -> tuple[Any, ...]:
+            view = controller.favorites_view(
+                selected, previous, entering=entering, notice=notice
+            )
+            values = list(_favorites_values(view))
+            values[8] = _update(
+                interactive=bool(view.card) and not controller.service.generation_active
+            )
+            if (
+                preserve_audio
+                and view.selection == selected
+                and view.card is not None
+                and view.card.audio_path is not None
+                and view.card.audio_path == audio_path
+            ):
+                values[6] = _skip()
+            return tuple(values)
+
+        def favorite_card_event(
+            session: str | None,
+            selected: str | None,
+            previous: tuple[str, ...],
+            audio_path: str | None,
+            slot: str,
+        ) -> tuple[Any, ...]:
+            view = controller.toggle_favorite(session, slot)
+            return (
+                *_view_values(view),
+                *refreshed_favorites(
+                    selected,
+                    previous,
+                    audio_path,
+                    notice=view.notice,
+                    preserve_audio=True,
+                ),
+                _update(choices=list(controller.history().history_choices)),
+            )
+
+        audio_retry_handles = []
         for index, slot_id in enumerate(VariantSlot.SLOT_IDS):
             cards[index]["favorite"].click(
-                lambda session, slot=slot_id: _view_values(
-                    controller.toggle_favorite(session, slot)
+                lambda session, selected, previous, audio_path, slot=slot_id: (
+                    favorite_card_event(session, selected, previous, audio_path, slot)
                 ),
-                active_session,
-                app_outputs,
+                [
+                    active_session,
+                    favorite_selection,
+                    favorite_order,
+                    favorite_audio_path,
+                ],
+                [*app_outputs, *favorite_outputs, history_choice],
                 api_visibility="private",
-            )
-            cards[index]["audio_retry"].click(
-                _audio_retry_callback(controller, slot_id),
-                active_session,
-                app_outputs,
                 concurrency_limit=1,
-                concurrency_id="generation",
-                api_visibility="private",
+                concurrency_id="library",
+            )
+            audio_retry_handles.append(
+                cards[index]["audio_retry"].click(
+                    _audio_retry_callback(controller, slot_id),
+                    active_session,
+                    [*app_outputs, audio_retry_selection],
+                    concurrency_limit=1,
+                    concurrency_id="generation",
+                    api_visibility="private",
+                )
             )
 
         control_inputs = [
@@ -1031,33 +1321,253 @@ def create_app(
             api_visibility="private",
         )
 
+        def refresh_library(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None = None,
+            *,
+            entering: bool = False,
+        ) -> tuple[Any, ...]:
+            history = controller.history()
+            history_ids = {value for _, value in history.history_choices}
+            return (
+                _update(
+                    choices=list(history.history_choices),
+                    value=history_selected if history_selected in history_ids else None,
+                ),
+                *refreshed_favorites(
+                    selected,
+                    previous,
+                    audio_path,
+                    entering=entering,
+                    preserve_audio=not entering,
+                ),
+            )
+
         app.load(
-            lambda: _library_values(controller.history()),
+            lambda: refresh_library(None, (), None, entering=True),
             None,
-            [history_choice, favorite_choice, history_notice],
+            [history_choice, *favorite_outputs],
             api_visibility="private",
         )
-        open_history.click(
-            lambda selected: _view_values(controller.reopen(selected)),
-            history_choice,
-            app_outputs,
-            api_visibility="private",
-        )
-        # Favorites has no result surface of its own: an opened favorite is
-        # shown under Generate, and an empty choice leaves the tab unchanged.
-        open_favorite.click(
-            lambda selected: (
+        for handle in (generate_event_handle, prompt_event_handle):
+            handle.then(
+                refresh_library,
                 [
-                    *_view_values(controller.reopen(selected.split("|", 1)[0])),
-                    gr.Tabs(selected="generate"),
-                    _update(visible=True),
-                ]
-                if selected
-                else [_skip()] * (len(app_outputs) + 2)
-            ),
-            favorite_choice,
-            [*app_outputs, tabs, results],
+                    favorite_selection,
+                    favorite_order,
+                    history_choice,
+                    favorite_audio_path,
+                ],
+                [history_choice, *favorite_outputs],
+                api_visibility="private",
+                concurrency_limit=1,
+                concurrency_id="library",
+            )
+
+        def refresh_after_audio_retry(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None,
+            retried: str | None,
+        ) -> tuple[Any, ...]:
+            # Reload a replacement at the same path only for the retried loop.
+            # Other favorites keep their loaded source and uninterrupted playback.
+            return refresh_library(
+                selected,
+                previous,
+                history_selected,
+                None if selected == retried else audio_path,
+            )
+
+        for handle in audio_retry_handles:
+            handle.then(
+                refresh_after_audio_retry,
+                [
+                    favorite_selection,
+                    favorite_order,
+                    history_choice,
+                    favorite_audio_path,
+                    audio_retry_selection,
+                ],
+                [history_choice, *favorite_outputs],
+                api_visibility="private",
+                concurrency_limit=1,
+                concurrency_id="library",
+            )
+
+        def open_history_event(selected: str | None) -> tuple[Any, ...]:
+            if not selected:
+                return (
+                    *([_skip()] * len(app_outputs)),
+                    _skip(),
+                    "Select a saved session.",
+                )
+            try:
+                return (
+                    *_view_values(controller.reopen(selected)),
+                    _update(
+                        choices=list(controller.history().history_choices),
+                        value=selected,
+                    ),
+                    "",
+                )
+            except (StorageError, ContainmentError, OSError):
+                return (
+                    *([_skip()] * len(app_outputs)),
+                    _update(
+                        choices=list(controller.history().history_choices), value=None
+                    ),
+                    "That session is unavailable. History was refreshed.",
+                )
+
+        open_history.click(
+            open_history_event,
+            history_choice,
+            [*app_outputs, history_choice, history_notice],
             api_visibility="private",
+        )
+
+        def select_favorite(
+            selected: str, previous: tuple[str, ...]
+        ) -> tuple[Any, ...]:
+            values = list(refreshed_favorites(selected, previous))
+            # Native Radio already marked this choice; leave its scroll position alone.
+            if values[1] == selected and values[2] == tuple(previous):
+                values[0] = _skip()
+            return tuple(values)
+
+        favorite_choice.input(
+            select_favorite,
+            [favorite_choice, favorite_order],
+            favorite_outputs,
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+            trigger_mode="always_last",
+        )
+
+        def unfavorite_event(
+            selected: str | None,
+            previous: tuple[str, ...],
+            session: str | None,
+            history_selected: str | None,
+            chosen: str | None,
+        ) -> tuple[Any, ...]:
+            from .services import ActiveSessionError
+
+            if chosen != selected:
+                values = [_skip()] * len(favorite_outputs)
+                values[10] = (
+                    "Wait for the selected loop to finish loading, then try again."
+                )
+                return (*values, *([_skip()] * len(app_outputs)), _skip())
+
+            notice = "No favorite loop is selected."
+            if selected and "|" in selected:
+                source_id, slot_id = selected.split("|", 1)
+                try:
+                    current = controller.service.store.load(source_id)
+                    if (
+                        current.slot(slot_id).favorite
+                        and not controller.service.generation_active
+                    ):
+                        controller.service.set_favorite(source_id, slot_id, False)
+                        notice = "Favorite removed."
+                    else:
+                        notice = "This favorite changed. The collection was refreshed."
+                except (
+                    ValueError,
+                    KeyError,
+                    StorageError,
+                    ContainmentError,
+                    ActiveSessionError,
+                    OSError,
+                ) as error:
+                    if isinstance(error, ActiveSessionError):
+                        notice = (
+                            "Another session is working. Try again when it finishes."
+                        )
+                    else:
+                        notice = "This favorite is unavailable. The collection was refreshed."
+            batch_values: list[Any] = [_skip()] * len(app_outputs)
+            if session and selected and selected.split("|", 1)[0] == session:
+                with suppress(StorageError, ContainmentError):
+                    batch_values = _view_values(controller.reopen(session))
+            return (
+                *refreshed_favorites(selected, previous, notice=notice),
+                *batch_values,
+                _update(
+                    choices=list(choices := controller.history().history_choices),
+                    value=history_selected
+                    if history_selected in {value for _, value in choices}
+                    else None,
+                ),
+            )
+
+        unfavorite.click(
+            unfavorite_event,
+            [
+                favorite_selection,
+                favorite_order,
+                active_session,
+                history_choice,
+                favorite_choice,
+            ],
+            [*favorite_outputs, *app_outputs, history_choice],
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+
+        def open_source_event(
+            selected: str | None, previous: tuple[str, ...], chosen: str | None
+        ) -> tuple[Any, ...]:
+            if chosen != selected:
+                values = [_skip()] * len(favorite_outputs)
+                values[10] = (
+                    "Wait for the selected loop to finish loading, then try again."
+                )
+                return (*([_skip()] * (len(app_outputs) + 3)), *values)
+
+            if selected and "|" in selected:
+                source_id = selected.split("|", 1)[0]
+                try:
+                    view = controller.reopen(source_id)
+                except (StorageError, ContainmentError, OSError):
+                    pass
+                else:
+                    return (
+                        *_view_values(view),
+                        _update(
+                            choices=list(controller.history().history_choices),
+                            value=source_id,
+                        ),
+                        gr.Tabs(selected="history"),
+                        _update(visible=True),
+                        *refreshed_favorites(selected, previous),
+                    )
+            return (
+                *([_skip()] * (len(app_outputs) + 3)),
+                *refreshed_favorites(
+                    selected,
+                    previous,
+                    notice="The source session is unavailable. The collection was refreshed.",
+                ),
+            )
+
+        source_session.click(
+            open_source_event,
+            [favorite_selection, favorite_order, favorite_choice],
+            [*app_outputs, history_choice, tabs, results, *favorite_outputs],
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
         )
         for tab, shows_results in (
             (generate_tab, True),
@@ -1069,13 +1579,44 @@ def create_app(
                 lambda visible=shows_results: _update(visible=visible),
                 None,
                 results,
+                js=_PAUSE_AUDIO_JS,
                 api_visibility="private",
             )
-        trash.click(
-            lambda selected: _library_values(controller.trash(selected)),
-            history_choice,
-            [history_choice, favorite_choice, history_notice],
+        favorites_tab.select(
+            lambda selected, previous: refreshed_favorites(
+                selected, previous, entering=True
+            ),
+            [favorite_selection, favorite_order],
+            favorite_outputs,
             api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+        history_tab.select(
+            lambda selected: _update(
+                choices=list(choices := controller.history().history_choices),
+                value=selected if selected in {value for _, value in choices} else None,
+            ),
+            history_choice,
+            history_choice,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+        trash.click(
+            lambda selected, favorite, previous: (
+                _update(
+                    choices=list((view := controller.trash(selected)).history_choices),
+                    value=None,
+                ),
+                *refreshed_favorites(favorite, previous, notice=view.notice),
+                view.notice,
+            ),
+            [history_choice, favorite_selection, favorite_order],
+            [history_choice, *favorite_outputs, history_notice],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
         )
         secret_outputs = [
             credential_notice,

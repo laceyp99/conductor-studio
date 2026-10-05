@@ -114,9 +114,14 @@ automatically.
 5. A provider, validation, or persistence error fails the entire batch with one
    sanitized error. Start a new session to try generation again; Studio never
    repeats the provider request within an existing session.
-6. Reopen completed work from History or Favorites without provider activity.
-   Results appear under Generate and History; opening a favorite switches to
-   Generate.
+6. Reopen completed batches from History without provider activity. Favorite
+   individual variations from their cards once saved MIDI is available.
+   Favorites presents one loop with a scrollable list on the right, ordered
+   by newest generated session. Opening Favorites selects the top loop;
+   starring and unstarring update the collection immediately. Use **Open
+   source session** to see its original four variations in History.
+   Changing loops stops playback; audio never starts automatically. Missing
+   files remain listed with a warning, and can still be unfavorited.
 
 After successful MIDI publication, Studio derives loop JSON and piano-roll
 images and may render up to four MP3 previews. Those jobs are optional: a roll
