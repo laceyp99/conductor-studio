@@ -35,16 +35,21 @@ Never pin a sibling checkout or a mutable branch name.
 
 1. Check first. Read the pinned SHA from `pyproject.toml` and confirm `uv.lock`
    and `README.md` agree. Clone Core into a scratch directory outside the repo
-   and find which tag the SHA belongs to:
+   and identify the pin:
 
    ```powershell
    git ls-remote --tags https://github.com/laceyp99/conductor-core.git
-   git tag --contains <pinned-sha>
+   git tag --points-at <pinned-sha>          # exact release tag, if any
+   git describe --tags --abbrev=0 <pinned-sha>  # nearest earlier release
    ```
 
    The pin may be an **untagged branch commit** (Studio has pinned unreleased
-   Core fixes before). If so, find out what that commit adds beyond its base
-   tag, and treat it as a feature the target release must also contain.
+   Core fixes before). If `--points-at` prints nothing, review
+   `git log <nearest-tag>..<pinned-sha>` for what the pin adds. Then check
+   whether the target release contains it with
+   `git merge-base --is-ancestor <pinned-sha> <target-tag>`. If the commit is
+   not an ancestor, compare the source directly; the fix may have landed under
+   a different commit or not at all.
 
 2. Find the newest stable tag. Compare as semantic versions and skip
    prereleases unless asked. Tags can skip versions (for example 0.6.0 to
