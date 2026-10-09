@@ -64,11 +64,14 @@ BatchOutcome = NormalizedBatchResult | AdapterFailure
 ProgressCallback = Callable[[NormalizedBatchProgress], None]
 
 
-def ollama_model_list(*, host_address: str, request_timeout: float) -> list[str]:
-    """List installed names without inspecting model capabilities."""
+def ollama_model_list(*, host_address: str) -> list[str | None]:
+    """List installed names without inspecting model capabilities.
+
+    Core v0.8.3 accepts no timeout here, so this request is not bounded.
+    """
     from conductor_core.providers.ollama import get_model_list
 
-    return get_model_list(host_address=host_address, request_timeout=request_timeout)
+    return get_model_list(host_address=host_address)
 
 
 def ollama_model_status(
