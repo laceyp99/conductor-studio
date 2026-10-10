@@ -1,0 +1,6 @@
+interface:
+  display_name: "Check Core Update"
+  short_description: "Migrate conductor-studio to the latest Core release"
+
+policy:
+  allow_implicit_invocation: true

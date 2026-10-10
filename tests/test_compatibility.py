@@ -11,7 +11,7 @@ from conductor_studio.catalog import DEFAULT_PROVIDER, ModelCatalog
 
 
 def test_core_public_contract_is_available() -> None:
-    assert version("conductor-core") == "0.6.0"
+    assert version("conductor-core") == "0.8.3"
 
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
@@ -110,10 +110,7 @@ def test_core_ollama_discovery_contract_matches_studio_loaders() -> None:
         variations_gen,
     )
 
-    assert list(signature(get_model_list).parameters) == [
-        "host_address",
-        "request_timeout",
-    ]
+    assert list(signature(get_model_list).parameters) == ["host_address"]
     assert list(signature(get_model_status).parameters) == [
         "model_name",
         "host_address",

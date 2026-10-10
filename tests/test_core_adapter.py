@@ -12,6 +12,7 @@ from conductor_studio.core_adapter import (
     AdapterFailure,
     CoreAdapter,
     NormalizedBatchResult,
+    ollama_model_list,
 )
 from conductor_studio.models import (
     AudioState,
@@ -105,7 +106,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.6.0", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.8.3", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -263,3 +264,10 @@ def test_audio_readiness_prevents_render(tmp_path):
     )
     assert slot.audio.state is AudioState.UNAVAILABLE
     assert "FluidSynth" in slot.audio.failure.message
+
+
+def test_ollama_model_list_drops_unnamed_core_entries(monkeypatch):
+    from conductor_core.providers import ollama
+
+    monkeypatch.setattr(ollama, "get_model_list", lambda **_: ["a", None, "", "b"])
+    assert ollama_model_list(host_address="http://ollama") == ["a", "b"]

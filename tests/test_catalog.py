@@ -109,18 +109,17 @@ def test_each_model_gets_one_way_to_choose_reasoning() -> None:
 def test_ollama_refresh_lists_names_without_inspection() -> None:
     calls = []
 
-    def loader(*, host_address, request_timeout):
-        calls.append((host_address, request_timeout))
+    def loader(*, host_address):
+        calls.append(host_address)
         return ["llama3", "llama3"]
 
     catalog = ModelCatalog(
         model_info_loader=_info,
         ollama_list_loader=loader,
         ollama_model_loader=lambda **_: {"model_capabilities": None},
-        ollama_timeout=1.25,
     )
     status = catalog.refresh_ollama("http://ollama")
-    assert calls == [("http://ollama", 1.25)]
+    assert calls == ["http://ollama"]
     assert status.available is True
     assert status.models == ("llama3",)
     assert catalog.providers()[-1] == "Ollama"
@@ -295,7 +294,8 @@ def test_core_discovery_inspects_only_selection_and_refresh_invalidates_cache(
             )
 
     def initialize(*, host_address, timeout=None):
-        assert timeout == 1.25
+        # Core v0.8.3 bounds only selected-model inspection, not the listing.
+        assert timeout in (None, 1.25)
         return Client(host_address)
 
     monkeypatch.setattr(ollama, "initialize_ollama_client", initialize)
@@ -349,7 +349,7 @@ def test_inspection_failure_is_cached_without_breaking_cloud_controls():
 
 
 @pytest.mark.parametrize("timeout", [2.0, 1.25])
-def test_discovery_bounds_the_actual_http_request(monkeypatch, timeout):
+def test_inspection_bounds_the_actual_http_request(monkeypatch, timeout):
     import httpx
     from conductor_core.providers import ollama
 
@@ -367,12 +367,14 @@ def test_discovery_bounds_the_actual_http_request(monkeypatch, timeout):
             **kwargs, transport=httpx.MockTransport(stalled_server)
         ),
     )
-    catalog = ModelCatalog(model_info_loader=_info, ollama_timeout=timeout)
+    catalog = ModelCatalog(
+        model_info_loader=_info,
+        ollama_list_loader=lambda **_: ["m"],
+        ollama_timeout=timeout,
+    )
+    catalog.refresh_ollama("http://ollama.test")
 
-    status = catalog.refresh_ollama("http://ollama.test")
-
-    assert status.available is False
-    assert status.models == ()
+    assert catalog.lookup("Ollama", "m").control_mode == "temperature"
     assert [request.url.path for request in requests] == ["/api/tags"]
     assert requests[0].extensions["timeout"] == dict.fromkeys(
         ("connect", "read", "write", "pool"), timeout
@@ -420,7 +422,7 @@ def test_control_selection_and_refresh_use_one_catalog_snapshot(replacement):
 
     catalog = Catalog(
         model_info_loader=_info,
-        ollama_list_loader=lambda *, host_address, request_timeout: (
+        ollama_list_loader=lambda *, host_address: (
             ("old",) if host_address == "http://old" else replacement
         ),
         ollama_model_loader=inspect,

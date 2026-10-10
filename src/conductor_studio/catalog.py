@@ -478,9 +478,7 @@ class ModelCatalog:
             False, (), _safe_host_label(selected_host)
         )
         try:
-            raw_models = self._ollama_list_loader(
-                host_address=selected_host, request_timeout=self.ollama_timeout
-            )
+            raw_models = self._ollama_list_loader(host_address=selected_host)
         except Exception as exc:  # local readiness must never break cloud UI
             self._ollama_status = OllamaReadiness(
                 False,
@@ -497,13 +495,13 @@ class ModelCatalog:
                 raise CatalogError("Ollama model IDs must be nonblank strings")
             if model not in model_ids:
                 model_ids.append(model)
+        host_label = _safe_host_label(selected_host)
         self._ollama_status = OllamaReadiness(
             available=bool(model_ids),
             models=tuple(model_ids),
-            host=_safe_host_label(selected_host),
-            error=None
-            if model_ids
-            else "No Ollama models found at the configured host.",
+            host=host_label,
+            # Core returns [] for an unreachable host too (conductor-core#135).
+            error=None if model_ids else f"No Ollama models found at {host_label}.",
         )
         self._ollama = tuple(
             _normalize_ollama_model(model, None) for model in model_ids
