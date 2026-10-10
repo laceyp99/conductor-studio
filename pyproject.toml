@@ -26,10 +26,6 @@ dev = [
 
 [tool.uv]
 required-version = ">=0.12.6"
-# anthropic 1.x removed `temperature` from Messages.create. Core v0.8.3 sends it
-# through `extra_body` and supports 1.x, but Studio keeps the 0.x line until a
-# live Claude temperature request has been verified on 1.x.
-constraint-dependencies = ["anthropic<1"]
 
 [tool.hatch.build]
 exclude = [
