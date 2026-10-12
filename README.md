@@ -144,7 +144,7 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       session.previous.json
       core/
         generations/          # Core child records and MIDI
-          variations/         # Core batch records since v0.9.0
+          variations/
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png

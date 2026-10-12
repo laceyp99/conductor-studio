@@ -26,38 +26,10 @@
 - Keep session manifests authoritative under the configured Studio root.
 - Serve files only from the dedicated `served/` directory; block `sessions/`
   and `trash/` from Gradio file serving.
-- Keep Gradio sharing disabled. The default bind is localhost; any non-loopback
-  bind requires explicit `--allow-network` and a no-authentication warning.
-
-## Browser verification over LAN and Tailscale
-
-- Identify where Studio, the browser, and any Ollama service run.
-  `localhost` refers to the machine making the connection. The Ollama
-  host must be reachable from Studio, independently of browser access.
-
-- Verify Studio responds on its server host before testing remotely.
-  For a browser on another device, use the server's reachable LAN or
-  Tailscale address. Prefer Tailscale for private remote previews.
-
-- Use Studio's supported `--host`, `--port`, and `--allow-network`
-  options. Bind to the Tailscale interface for Tailscale-only access;
-  use `0.0.0.0` when both LAN and Tailscale access are intended.
-  Open the server's actual address in the browser.
-
-- Preserve `share=False` and the existing file-serving restrictions.
-  Disclose that Studio has no authentication when enabling network access.
-
-- Prefer the environment's native browser tools and follow their
-  documented fallback rules. If automatic preview routing fails, try
-  a verified direct server URL.
-
-- Diagnose startup, binding, address, routing, host permission prompts,
-  and browser-tool failures separately. Do not change firewall rules,
-  access policies, or enable public sharing without authorization.
-
-- Report which addresses and devices were verified, temporary
-  workarounds, and remaining gaps. Stop temporary servers after
-  verification unless the user needs them for review.
+- Keep Gradio sharing disabled and default to loopback.
+  For authorized remote previews, bind to the server host's Tailscale IP using
+  `--host <tailscale-ip> --allow-network`. Keep the no-authentication warning
+  visible. `--allow-network` permits binding; it does not authenticate users.
 
 ## Domain and persistence
 
