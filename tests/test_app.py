@@ -13,6 +13,7 @@ from conductor_studio.app import (
     StudioController,
     _audio_retry_callback,
     _card_view,
+    _control_values,
     _empty_card,
     _ollama_values,
     _slot_metadata,
@@ -635,6 +636,40 @@ def test_failed_ollama_inspection_hides_controls_and_blocks_generation(tmp_path)
             SessionSettings(prompt="piano", provider="Ollama", model="thinker")
         )
     assert service.active_session_id is None
+
+
+def test_temperature_survives_switching_through_failed_ollama_inspection():
+    class Catalog(_OllamaCatalog):
+        def lookup(self, provider, model):
+            capability = super().lookup(provider, model)
+            return (
+                replace(capability, available=False, error="Inspection failed.")
+                if model == "failed"
+                else capability
+            )
+
+        def select_model(self, provider, preferred=None):
+            selected = preferred or self.discovered[0]
+            return self.discovered, self.lookup(provider, selected)
+
+    controller = StudioController(
+        object(),
+        Catalog(["working", "failed"]),
+        CredentialStore(environment={}),
+        object(),
+    )
+    working = controller.control_view("Ollama", "working", requested_temperature=0.3)
+    failed = controller.control_view(
+        "Ollama", "failed", requested_temperature=_control_values(working)[2]
+    )
+    restored = controller.control_view(
+        "Ollama", "working", requested_temperature=_control_values(failed)[2]
+    )
+
+    assert not failed.temperature_visible
+    assert restored.temperature_visible
+    assert restored.temperature_value == 0.3
+    assert restored.requested_temperature == 0.3
 
 
 def test_ollama_page_load_adds_provider_without_switching_or_touching_controls():
