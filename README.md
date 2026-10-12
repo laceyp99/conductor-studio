@@ -79,6 +79,8 @@ within Studio's `0.0`–`1.0` slider range for all models, avoiding values that
 some providers reject. The pinned Core contract has no seed field, so
 Studio neither offers nor emulates one.
 
+### Ollama model discovery
+
 Ollama models are discovered when the page loads and again on **Refresh Ollama
 models**. Discovery lists names without inspecting each installed model. Studio
 loads capabilities only for the selected model and caches them until the next
@@ -161,11 +163,6 @@ reconstruct results, or automatically retry. A rare crash after Core completes
 but before Studio publishes the batch can therefore leave unreferenced Core
 records under that session; a later new session may incur another provider
 charge.
-
-Existing Studio sessions remain readable without moving files. Sessions created
-before Core v0.9.0 retain batch records in `core/variations/`; new sessions use
-`core/generations/variations/`. Studio reads its own manifests and artifact
-references, not Core's variation history, so no history migration is needed.
 
 Deleting a terminal session moves its whole directory to managed Trash in one
 operation. Its manifests, backups, Core records in either layout, and derived
