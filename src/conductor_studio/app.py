@@ -1301,13 +1301,24 @@ def create_app(
             )
             return (*_control_values(view), view.notice)
 
-        provider.change(
-            current_controls,
-            control_inputs,
+        def provider_controls(
+            selected_provider: str,
+            previous: str,
+            requested: float,
+            think: bool,
+        ) -> tuple[Any, ...]:
+            # The outgoing model/effort can be invalid as choices are replaced.
+            return current_controls(
+                selected_provider, None, previous, requested, think, None
+            )
+
+        provider.input(
+            provider_controls,
+            [provider, control_mode, requested_temperature, thinking],
             [*control_outputs, ollama_notice],
             api_visibility="private",
         )
-        model.change(
+        model.input(
             current_controls,
             control_inputs,
             [*control_outputs, ollama_notice],
@@ -1320,13 +1331,13 @@ def create_app(
             return current_controls(*values)[1]
 
         for reasoning_control in (thinking, effort):
-            reasoning_control.change(
+            reasoning_control.input(
                 reasoning_temperature,
                 control_inputs,
                 temperature,
                 api_visibility="private",
             )
-        temperature.change(
+        temperature.input(
             lambda value, selected_provider, selected_model, enabled, level: (
                 gr.skip()
                 if controller.temperature_locked(

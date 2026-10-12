@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import replace
 from pathlib import Path
@@ -21,7 +22,7 @@ from conductor_studio.app import (
     _view_values,
     create_app,
 )
-from conductor_studio.catalog import ModelCapability
+from conductor_studio.catalog import ModelCapability, ModelCatalog
 from conductor_studio.credentials import CredentialStore
 from conductor_studio.models import (
     AudioInfo,
@@ -40,6 +41,67 @@ from conductor_studio.storage import (
     StorageError,
 )
 from conductor_studio.variation import create_manifest
+
+
+def test_provider_switch_does_not_preprocess_outgoing_dropdown_values(tmp_path):
+    from gradio.state_holder import SessionState
+
+    catalog = ModelCatalog(
+        ollama_list_loader=lambda **_: ["qwen3.5:4b"],
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    catalog.refresh_ollama()
+    credentials = CredentialStore(environment={})
+    service = SimpleNamespace(
+        store=SimpleNamespace(studio_root=tmp_path),
+        credentials=credentials,
+        history=list,
+        favorites=list,
+    )
+    app = create_app(service=service, catalog=catalog, credentials=credentials)
+    config = app.get_config_file()
+    components = {
+        component["props"].get("label"): component["id"]
+        for component in config["components"]
+        if component["props"].get("label")
+    }
+    for label in (
+        "Provider",
+        "Model",
+        "Temperature",
+        "Extended thinking",
+        "Reasoning effort",
+    ):
+        events = [
+            event
+            for dependency in config["dependencies"]
+            for target, event in dependency["targets"]
+            if target == components[label]
+        ]
+        assert events == ["input"]
+    provider_handler = next(
+        dependency
+        for dependency in config["dependencies"]
+        if any(
+            tuple(target) == (components["Provider"], "input")
+            for target in dependency["targets"]
+        )
+    )
+    assert components["Model"] not in provider_handler["inputs"]
+    assert components["Reasoning effort"] not in provider_handler["inputs"]
+
+    async def switch_providers():
+        state = SessionState(app)
+        for provider in ("Ollama", "Google", "Anthropic", "Ollama"):
+            # Process Gradio's real input validation and per-session choice updates.
+            result = await app.process_api(
+                provider_handler["id"], [provider, None, None, False], state=state
+            )
+            model = result["data"][0]
+            assert model["value"] == catalog.models(provider)[0].model
+            assert model["value"] in [value for _, value in model["choices"]]
+
+    asyncio.run(switch_providers())
 
 
 class _Catalog:
