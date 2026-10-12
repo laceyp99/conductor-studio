@@ -26,8 +26,10 @@
 - Keep session manifests authoritative under the configured Studio root.
 - Serve files only from the dedicated `served/` directory; block `sessions/`
   and `trash/` from Gradio file serving.
-- Keep Gradio sharing disabled. The default bind is localhost; any non-loopback
-  bind requires explicit `--allow-network` and a no-authentication warning.
+- Keep Gradio sharing disabled and default to loopback.
+  For authorized remote previews, bind to the server host's Tailscale IP using
+  `--host <tailscale-ip> --allow-network`. Keep the no-authentication warning
+  visible. `--allow-network` permits binding; it does not authenticate users.
 
 ## Domain and persistence
 

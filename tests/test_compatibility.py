@@ -5,13 +5,14 @@ from importlib.metadata import version
 from inspect import signature
 
 import conductor_core
+import pytest
 from conductor_core import music, playback
 
 from conductor_studio.catalog import DEFAULT_PROVIDER, ModelCatalog
 
 
 def test_core_public_contract_is_available() -> None:
-    assert version("conductor-core") == "0.8.3"
+    assert version("conductor-core") == "0.10.0"
 
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
@@ -103,25 +104,34 @@ def test_core_variation_contract_is_available() -> None:
     assert method_signature.return_annotation is conductor_core.VariationBatchResult
 
 
-def test_core_ollama_discovery_contract_matches_studio_loaders() -> None:
+def test_core_ollama_discovery_contract_matches_studio_loaders(monkeypatch) -> None:
+    from conductor_core.providers import ollama
     from conductor_core.providers.ollama import (
+        OllamaModelInspection,
         get_model_list,
         get_model_status,
         variations_gen,
     )
 
-    assert list(signature(get_model_list).parameters) == ["host_address"]
+    assert list(signature(get_model_list).parameters) == [
+        "host_address",
+        "request_timeout",
+    ]
     assert list(signature(get_model_status).parameters) == [
         "model_name",
         "host_address",
         "request_timeout",
     ]
-    offline = get_model_status(
-        "m", host_address="http://127.0.0.1:9", request_timeout=0.1
-    )
-    assert {"available", "installed", "model_capabilities", "host", "error"} <= set(
-        offline
-    )
+    assert {"name", "capabilities", "error"} <= {
+        field.name for field in fields(OllamaModelInspection)
+    }
+
+    def offline(**_):
+        raise conductor_core.ProviderConnectionError("Ollama", "offline")
+
+    monkeypatch.setattr(ollama, "initialize_ollama_client", offline)
+    with pytest.raises(conductor_core.ProviderConnectionError):
+        get_model_status("m", host_address="http://ollama", request_timeout=0.1)
     assert {"use_thinking", "effort", "model_capabilities"} <= set(
         signature(variations_gen).parameters
     )

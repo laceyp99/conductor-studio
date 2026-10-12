@@ -1,6 +1,7 @@
 interface:
   display_name: "Check Core Update"
-  short_description: "Migrate conductor-studio to the latest Core release"
+  short_description: "Check and migrate Studio's pinned Core release"
+  default_prompt: "Use $check-core-update to inspect and migrate Conductor Studio to the requested Conductor Core release."
 
 policy:
   allow_implicit_invocation: true

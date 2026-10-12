@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.8.3 from the immutable commit below, never
+Studio installs Conductor Core v0.10.0 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-bdf41272e02734808d654e104191adc9ec9ba90a
+8480f09827ac5cf410014076427069e1911b34fe
 ```
 
 ## Credentials and controls
@@ -79,14 +79,17 @@ within Studio's `0.0`–`1.0` slider range for all models, avoiding values that
 some providers reject. The pinned Core contract has no seed field, so
 Studio neither offers nor emulates one.
 
+### Ollama model discovery
+
 Ollama models are discovered when the page loads and again on **Refresh Ollama
 models**. Discovery lists names without inspecting each installed model. Studio
 loads capabilities only for the selected model and caches them until the next
 refresh, including when switching hosts. Their controls follow the same rules,
 based on the per-model capabilities Core reads from Ollama. Selected-model
-inspection uses a two-second request timeout by default. Core v0.8.3 accepts no
-timeout for the name listing, so discovery against an unreachable host waits for
-the connection to fail.
+inspection and name listing use a two-second request timeout by default. Listing
+failures are reported separately from a successful listing with no installed
+models. A selected model whose inspection fails cannot generate until a refresh
+and successful inspection.
 Ollama reports no fixed thinking
 temperature, so the slider stays adjustable while thinking. For Ollama only,
 a collapsed **Advanced Settings** section holds **Ollama Context Size**:
@@ -141,7 +144,7 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       session.previous.json
       core/
         generations/          # Core child records and MIDI
-        variations/           # Core batch records
+          variations/
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png
@@ -162,9 +165,9 @@ records under that session; a later new session may incur another provider
 charge.
 
 Deleting a terminal session moves its whole directory to managed Trash in one
-operation. Its manifests, backups, `core/generations`, `core/variations`, and
-derived variants stay together. Restore by moving the complete directory back;
-do not copy individual Core files.
+operation. Its manifests, backups, Core records in either layout, and derived
+variants stay together. Restore by moving the complete directory back; do not
+copy individual Core files.
 
 ## Security boundary
 

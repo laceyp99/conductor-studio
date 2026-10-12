@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from conductor_studio.app import (
     StudioController,
     _audio_retry_callback,
     _card_view,
+    _control_values,
     _empty_card,
     _ollama_values,
     _slot_metadata,
@@ -20,7 +22,7 @@ from conductor_studio.app import (
     _view_values,
     create_app,
 )
-from conductor_studio.catalog import ModelCapability
+from conductor_studio.catalog import ModelCapability, ModelCatalog
 from conductor_studio.credentials import CredentialStore
 from conductor_studio.models import (
     AudioInfo,
@@ -39,6 +41,67 @@ from conductor_studio.storage import (
     StorageError,
 )
 from conductor_studio.variation import create_manifest
+
+
+def test_provider_switch_does_not_preprocess_outgoing_dropdown_values(tmp_path):
+    from gradio.state_holder import SessionState
+
+    catalog = ModelCatalog(
+        ollama_list_loader=lambda **_: ["qwen3.5:4b"],
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    catalog.refresh_ollama()
+    credentials = CredentialStore(environment={})
+    service = SimpleNamespace(
+        store=SimpleNamespace(studio_root=tmp_path),
+        credentials=credentials,
+        history=list,
+        favorites=list,
+    )
+    app = create_app(service=service, catalog=catalog, credentials=credentials)
+    config = app.get_config_file()
+    components = {
+        component["props"].get("label"): component["id"]
+        for component in config["components"]
+        if component["props"].get("label")
+    }
+    for label in (
+        "Provider",
+        "Model",
+        "Temperature",
+        "Extended thinking",
+        "Reasoning effort",
+    ):
+        events = [
+            event
+            for dependency in config["dependencies"]
+            for target, event in dependency["targets"]
+            if target == components[label]
+        ]
+        assert events == ["input"]
+    provider_handler = next(
+        dependency
+        for dependency in config["dependencies"]
+        if any(
+            tuple(target) == (components["Provider"], "input")
+            for target in dependency["targets"]
+        )
+    )
+    assert components["Model"] not in provider_handler["inputs"]
+    assert components["Reasoning effort"] not in provider_handler["inputs"]
+
+    async def switch_providers():
+        state = SessionState(app)
+        for provider in ("Ollama", "Google", "Anthropic", "Ollama"):
+            # Process Gradio's real input validation and per-session choice updates.
+            result = await app.process_api(
+                provider_handler["id"], [provider, None, None, False], state=state
+            )
+            model = result["data"][0]
+            assert model["value"] == catalog.models(provider)[0].model
+            assert model["value"] in [value for _, value in model["choices"]]
+
+    asyncio.run(switch_providers())
 
 
 class _Catalog:
@@ -593,6 +656,82 @@ def test_ollama_refresh_selects_ollama_with_complete_temperature_controls():
     assert mode == "temperature"
     assert advanced["visible"] is True
     assert "1 model" in notice
+
+
+def test_failed_ollama_inspection_hides_controls_and_blocks_generation(tmp_path):
+    error = (
+        "Ollama model inspection failed (ProviderTimeoutError). Refresh Ollama models."
+    )
+
+    class Catalog(_OllamaCatalog):
+        def lookup(self, provider, model):
+            return replace(
+                super().lookup(provider, model), available=False, error=error
+            )
+
+        def select_model(self, provider, preferred=None):
+            return self.discovered, self.lookup(provider, self.discovered[0])
+
+    catalog = Catalog(["thinker"])
+    credentials = CredentialStore(environment={})
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(store=store, catalog=catalog, credentials=credentials)
+    controller = StudioController(service, catalog, credentials, object())
+
+    controls = controller.control_view("Ollama", "thinker")
+    assert not controls.temperature_visible
+    assert not controls.thinking_visible
+    assert not controls.effort_visible
+    assert controls.notice == error
+    assert _ollama_values(controller, "", "Ollama", True)[-2] == error
+
+    views = list(
+        controller.generate(
+            "piano", "C", "major", "Ollama", "thinker", 0.7, 0.7, False, None
+        )
+    )
+    assert len(views) == 1
+    assert views[0].notice == error
+    assert not store.history()
+    with pytest.raises(ValueError, match="not ready"):
+        service.create_session(
+            SessionSettings(prompt="piano", provider="Ollama", model="thinker")
+        )
+    assert service.active_session_id is None
+
+
+def test_temperature_survives_switching_through_failed_ollama_inspection():
+    class Catalog(_OllamaCatalog):
+        def lookup(self, provider, model):
+            capability = super().lookup(provider, model)
+            return (
+                replace(capability, available=False, error="Inspection failed.")
+                if model == "failed"
+                else capability
+            )
+
+        def select_model(self, provider, preferred=None):
+            selected = preferred or self.discovered[0]
+            return self.discovered, self.lookup(provider, selected)
+
+    controller = StudioController(
+        object(),
+        Catalog(["working", "failed"]),
+        CredentialStore(environment={}),
+        object(),
+    )
+    working = controller.control_view("Ollama", "working", requested_temperature=0.3)
+    failed = controller.control_view(
+        "Ollama", "failed", requested_temperature=_control_values(working)[2]
+    )
+    restored = controller.control_view(
+        "Ollama", "working", requested_temperature=_control_values(failed)[2]
+    )
+
+    assert not failed.temperature_visible
+    assert restored.temperature_visible
+    assert restored.temperature_value == 0.3
+    assert restored.requested_temperature == 0.3
 
 
 def test_ollama_page_load_adds_provider_without_switching_or_touching_controls():

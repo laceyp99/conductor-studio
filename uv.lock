@@ -483,8 +483,8 @@ wheels = [
 
 [[package]]
 name = "conductor-core"
-version = "0.8.3"
-source = { git = "https://github.com/laceyp99/conductor-core.git?rev=bdf41272e02734808d654e104191adc9ec9ba90a#bdf41272e02734808d654e104191adc9ec9ba90a" }
+version = "0.10.0"
+source = { git = "https://github.com/laceyp99/conductor-core.git?rev=8480f09827ac5cf410014076427069e1911b34fe#8480f09827ac5cf410014076427069e1911b34fe" }
 dependencies = [
     { name = "mido" },
     { name = "pydantic" },
@@ -523,7 +523,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "conductor-core", extras = ["playback", "providers"], git = "https://github.com/laceyp99/conductor-core.git?rev=bdf41272e02734808d654e104191adc9ec9ba90a" },
+    { name = "conductor-core", extras = ["playback", "providers"], git = "https://github.com/laceyp99/conductor-core.git?rev=8480f09827ac5cf410014076427069e1911b34fe" },
     { name = "gradio", specifier = "==6.26.0" },
     { name = "matplotlib", specifier = ">=3.9,<4" },
     { name = "pydantic", specifier = ">=2.11,<3" },
