@@ -339,6 +339,8 @@ class StudioController:
         context_window: Any = None,
     ) -> SessionSettings:
         capability = self.catalog.lookup(provider, model)
+        if not capability.available:
+            raise ValueError(capability.error or "The selected model is not ready.")
         thinking, effort = capability.reasoning(thinking, effort)
         # The slider holds the user's choice unless it shows a fixed thinking
         # temperature; the requested state keeps the choice in that case.
@@ -396,6 +398,15 @@ class StudioController:
             )  # type: ignore[arg-type]
             return
         try:
+            capability = self.catalog.lookup(provider, model)
+            if not capability.available:
+                yield AppView(
+                    None,
+                    tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
+                    True,
+                    capability.error or "The selected model is not ready.",
+                )
+                return
             manifest = self.service.create_session(
                 self._settings(
                     prompt,
@@ -614,7 +625,7 @@ class StudioController:
         """
         choices, capability = self.catalog.select_model(provider, model)
         selected = capability.model if capability else None
-        if capability is None:
+        if capability is None or not capability.available:
             return ControlView(
                 choices,
                 selected,
@@ -628,6 +639,8 @@ class StudioController:
                 (),
                 None,
                 False,
+                notice=capability.error if capability else "",
+                context_visible=provider == "Ollama",
             )
         mode, efforts = capability.control_mode, tuple(capability.effort_choices)
         # The toggle state carries over only between models that offer it; an
@@ -1278,22 +1291,27 @@ def create_app(
             think: bool,
             selected_effort: str | None,
         ) -> tuple[Any, ...]:
-            return _control_values(
-                controller.control_view(
-                    selected_provider,
-                    selected_model,
-                    previous_mode=previous,
-                    requested_temperature=requested,
-                    thinking=think,
-                    effort=selected_effort,
-                )
+            view = controller.control_view(
+                selected_provider,
+                selected_model,
+                previous_mode=previous,
+                requested_temperature=requested,
+                thinking=think,
+                effort=selected_effort,
             )
+            return (*_control_values(view), view.notice)
 
         provider.change(
-            current_controls, control_inputs, control_outputs, api_visibility="private"
+            current_controls,
+            control_inputs,
+            [*control_outputs, ollama_notice],
+            api_visibility="private",
         )
         model.change(
-            current_controls, control_inputs, control_outputs, api_visibility="private"
+            current_controls,
+            control_inputs,
+            [*control_outputs, ollama_notice],
+            api_visibility="private",
         )
 
         def reasoning_temperature(*values: Any) -> Any:
@@ -1686,6 +1704,8 @@ def _ollama_values(
         selected = providers[0] if providers else None
         controls = controller.control_view(selected) if selected else None
     control_values = _control_values(controls) if controls else (_skip(),) * 7
+    if controls and controls.notice:
+        notice = controls.notice
     return (
         _update(choices=list(providers), value=selected),
         *control_values,

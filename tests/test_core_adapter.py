@@ -106,7 +106,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.8.3", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.10.0", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -266,8 +266,50 @@ def test_audio_readiness_prevents_render(tmp_path):
     assert "FluidSynth" in slot.audio.failure.message
 
 
-def test_ollama_model_list_drops_unnamed_core_entries(monkeypatch):
+def test_ollama_model_list_passes_timeout(monkeypatch):
     from conductor_core.providers import ollama
 
-    monkeypatch.setattr(ollama, "get_model_list", lambda **_: ["a", None, "", "b"])
-    assert ollama_model_list(host_address="http://ollama") == ["a", "b"]
+    def listing(**kwargs):
+        assert kwargs == {"host_address": "http://ollama", "request_timeout": 1.25}
+        return ["a", "b"]
+
+    monkeypatch.setattr(ollama, "get_model_list", listing)
+    assert ollama_model_list(host_address="http://ollama", request_timeout=1.25) == [
+        "a",
+        "b",
+    ]
+
+
+@pytest.mark.parametrize("result", ["success", "missing", "failed"])
+def test_ollama_inspection_normalizes_core_records(monkeypatch, result):
+    from conductor_core.errors import ProviderError
+    from conductor_core.providers import ollama
+
+    from conductor_studio.core_adapter import ollama_model_status
+
+    capabilities = {"extended_thinking": False}
+    record = {
+        "success": ollama.OllamaModelInspection("m", capabilities, None),
+        "missing": None,
+        "failed": ollama.OllamaModelInspection(
+            "m", None, ProviderError("Ollama", "private token=secret")
+        ),
+    }[result]
+
+    def inspect(**kwargs):
+        assert kwargs == {
+            "model_name": "m",
+            "host_address": "http://ollama",
+            "request_timeout": 1.25,
+        }
+        return record
+
+    monkeypatch.setattr(ollama, "get_model_status", inspect)
+    status = ollama_model_status(
+        model_name="m", host_address="http://ollama", request_timeout=1.25
+    )
+    assert status["model_capabilities"] == (
+        capabilities if result == "success" else None
+    )
+    assert bool(status["error"]) == (result != "success")
+    assert "secret" not in str(status)

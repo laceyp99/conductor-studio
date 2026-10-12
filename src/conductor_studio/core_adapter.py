@@ -64,16 +64,11 @@ BatchOutcome = NormalizedBatchResult | AdapterFailure
 ProgressCallback = Callable[[NormalizedBatchProgress], None]
 
 
-def ollama_model_list(*, host_address: str) -> list[str]:
-    """List installed names without inspecting model capabilities.
-
-    Core v0.8.3 accepts no timeout here, so this request is not bounded, and
-    may return unnamed (None) entries, which are dropped. See
-    laceyp99/conductor-core#135.
-    """
+def ollama_model_list(*, host_address: str, request_timeout: float) -> list[str]:
+    """List installed names with a bounded Core network request."""
     from conductor_core.providers.ollama import get_model_list
 
-    return [name for name in get_model_list(host_address=host_address) if name]
+    return get_model_list(host_address=host_address, request_timeout=request_timeout)
 
 
 def ollama_model_status(
@@ -82,11 +77,22 @@ def ollama_model_status(
     """Inspect only the selected model through the pinned Core API."""
     from conductor_core.providers.ollama import get_model_status
 
-    return get_model_status(
+    inspection = get_model_status(
         model_name=model_name,
         host_address=host_address,
         request_timeout=request_timeout,
     )
+    if inspection is None:
+        return {
+            "model_capabilities": None,
+            "error": "Ollama model is no longer installed. Refresh models.",
+        }
+    if inspection.error is not None:
+        return {
+            "model_capabilities": None,
+            "error": "Ollama model inspection failed. Refresh models to retry.",
+        }
+    return {"model_capabilities": inspection.capabilities, "error": None}
 
 
 def _safe(value: Any, limit: int = 500) -> str:

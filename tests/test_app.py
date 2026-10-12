@@ -595,6 +595,48 @@ def test_ollama_refresh_selects_ollama_with_complete_temperature_controls():
     assert "1 model" in notice
 
 
+def test_failed_ollama_inspection_hides_controls_and_blocks_generation(tmp_path):
+    error = (
+        "Ollama model inspection failed (ProviderTimeoutError). Refresh Ollama models."
+    )
+
+    class Catalog(_OllamaCatalog):
+        def lookup(self, provider, model):
+            return replace(
+                super().lookup(provider, model), available=False, error=error
+            )
+
+        def select_model(self, provider, preferred=None):
+            return self.discovered, self.lookup(provider, self.discovered[0])
+
+    catalog = Catalog(["thinker"])
+    credentials = CredentialStore(environment={})
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(store=store, catalog=catalog, credentials=credentials)
+    controller = StudioController(service, catalog, credentials, object())
+
+    controls = controller.control_view("Ollama", "thinker")
+    assert not controls.temperature_visible
+    assert not controls.thinking_visible
+    assert not controls.effort_visible
+    assert controls.notice == error
+    assert _ollama_values(controller, "", "Ollama", True)[-2] == error
+
+    views = list(
+        controller.generate(
+            "piano", "C", "major", "Ollama", "thinker", 0.7, 0.7, False, None
+        )
+    )
+    assert len(views) == 1
+    assert views[0].notice == error
+    assert not store.history()
+    with pytest.raises(ValueError, match="not ready"):
+        service.create_session(
+            SessionSettings(prompt="piano", provider="Ollama", model="thinker")
+        )
+    assert service.active_session_id is None
+
+
 def test_ollama_page_load_adds_provider_without_switching_or_touching_controls():
     import gradio as gr
 

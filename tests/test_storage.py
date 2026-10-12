@@ -78,7 +78,12 @@ def test_recovery_interrupts_batch_and_automatic_audio_atomically(tmp_path) -> N
     assert "Start a new session" in loaded.batch.failure.message
 
 
-def test_history_favorites_and_trash_moves_complete_session_tree(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "batch_directory", ["core/variations", "core/generations/variations"]
+)
+def test_history_favorites_and_trash_moves_complete_session_tree(
+    tmp_path, batch_directory
+) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
     complete(manifest)
@@ -86,7 +91,7 @@ def test_history_favorites_and_trash_moves_complete_session_tree(tmp_path) -> No
     session = store.session_dir(manifest.session_id, must_exist=True)
     expected = [
         "core/generations/generation-0/loop.mid",
-        "core/variations/batch-1/variation.json",
+        f"{batch_directory}/batch-1/variation.json",
         "variants/01/piano-roll.png",
     ]
     for relative in expected:

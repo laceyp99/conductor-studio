@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import isfinite
 from threading import RLock
 from typing import Any
 from urllib.parse import urlsplit
@@ -277,10 +278,7 @@ def _normalize_cloud_model(provider: str, model: Any, raw: Any) -> ModelCapabili
 
 
 def _normalize_ollama_model(model: str, raw: Any) -> ModelCapability:
-    """Map Core's per-model Ollama capabilities onto Studio controls.
-
-    A model without Core capability data (inspection failed) stays temperature-only rather than guessing thinking support.
-    """
+    """Map inspected Core Ollama capabilities onto Studio controls."""
     if raw is None:
         raw = {}
     if not isinstance(raw, Mapping):
@@ -347,7 +345,7 @@ class ModelCatalog:
             ollama_timeout, int | float
         ):
             raise TypeError("ollama_timeout must be a positive number")
-        if ollama_timeout <= 0:
+        if not isfinite(ollama_timeout) or ollama_timeout <= 0:
             raise ValueError("ollama_timeout must be a positive number")
         self._model_info_loader = model_info_loader or music.get_model_info
         self._ollama_list_loader = ollama_list_loader or ollama_model_list
@@ -455,14 +453,24 @@ class ModelCatalog:
                     request_timeout=self.ollama_timeout,
                 )
             except Exception:
-                # Preserve the existing temperature-only fallback on inspection
-                # failure. Cache it too; an explicit refresh allows another try.
-                status = {"model_capabilities": None}
+                status = {
+                    "model_capabilities": None,
+                    "error": "Ollama model inspection failed. Refresh models to retry.",
+                }
             if not isinstance(status, Mapping):
                 raise CatalogError("Ollama model status must be an object")
-            self._ollama_capabilities[model] = _normalize_ollama_model(
-                model, status.get("model_capabilities")
-            )
+            raw = status.get("model_capabilities")
+            if raw is None or status.get("error"):
+                self._ollama_capabilities[model] = replace(
+                    _normalize_ollama_model(model, None),
+                    available=False,
+                    readiness="unavailable",
+                    temperature_supported=False,
+                    error=status.get("error")
+                    or "Ollama model capabilities unavailable. Refresh models to retry.",
+                )
+            else:
+                self._ollama_capabilities[model] = _normalize_ollama_model(model, raw)
         return self._ollama_capabilities[model]
 
     def refresh_ollama(self, host: str | None = None) -> OllamaReadiness:
@@ -478,7 +486,9 @@ class ModelCatalog:
             False, (), _safe_host_label(selected_host)
         )
         try:
-            raw_models = self._ollama_list_loader(host_address=selected_host)
+            raw_models = self._ollama_list_loader(
+                host_address=selected_host, request_timeout=self.ollama_timeout
+            )
         except Exception as exc:  # local readiness must never break cloud UI
             self._ollama_status = OllamaReadiness(
                 False,
@@ -500,7 +510,6 @@ class ModelCatalog:
             available=bool(model_ids),
             models=tuple(model_ids),
             host=host_label,
-            # Core returns [] for an unreachable host too (conductor-core#135).
             error=None if model_ids else f"No Ollama models found at {host_label}.",
         )
         self._ollama = tuple(
