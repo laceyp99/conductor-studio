@@ -135,6 +135,33 @@ def test_wrong_count_indexes_missing_and_unsafe_paths_are_rejected(tmp_path):
         adapter.normalize_result(escaped)
 
 
+@pytest.mark.parametrize("problem", ["wrong_count", "missing_midi"])
+def test_rejected_batch_keeps_core_accounting(tmp_path, problem):
+    calls = []
+
+    class Engine:
+        def __init__(self, config):
+            self.root = Path(config.artifact_root)
+
+        def generate_variations(self, request, progress_callback):
+            calls.append(request)
+            if problem == "wrong_count":
+                return _result(self.root, indexes=(), received=3, status="failed")
+            result = _result(self.root)
+            Path(result.items[0].generation.midi_path).unlink()
+            return result
+
+    outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(_manifest())
+    assert isinstance(outcome, AdapterFailure)
+    assert len(calls) == 1
+    assert (
+        outcome.total_cost,
+        outcome.input_tokens,
+        outcome.output_tokens,
+        outcome.total_tokens,
+    ) == (0.12, 10, 20, 30)
+
+
 def test_symlinked_midi_is_rejected(tmp_path):
     root = tmp_path / "core" / "generations"
     result = _result(root)

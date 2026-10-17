@@ -174,7 +174,8 @@ class StudioService:
         self._emit(saved)
         return saved
 
-    def _failure(self, session_id, failure):
+    def _failure(self, session_id, failure, outcome: AdapterFailure | None = None):
+        """Persist a failed batch; `outcome` adds any cost and usage Core reported."""
         with self._coordinator_lock:
             current = self.store.load(session_id)
             moment = utc_now()
@@ -185,6 +186,13 @@ class StudioService:
                     generation_ids=[],
                     failure=failure.model_dump(mode="python"),
                 )
+                if outcome is not None:
+                    data["batch"].update(
+                        total_cost=outcome.total_cost,
+                        input_tokens=outcome.input_tokens,
+                        output_tokens=outcome.output_tokens,
+                        total_tokens=outcome.total_tokens,
+                    )
                 for slot in data["slots"]:
                     slot.update(state="failed", progress=None, finished_at=moment)
                 data["status"] = "failed"
@@ -277,7 +285,7 @@ class StudioService:
                 lambda event: self._progress(session_id, event),
             )
             if isinstance(outcome, AdapterFailure):
-                self._failure(session_id, outcome.failure)
+                self._failure(session_id, outcome.failure, outcome)
                 return
             if (
                 not isinstance(outcome, NormalizedBatchResult)
