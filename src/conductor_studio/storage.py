@@ -144,7 +144,13 @@ class SessionStore:
         try:
             raw = path.read_bytes()
             document = json.loads(raw)
+            if not isinstance(document, dict):
+                raise TypeError("manifest root must be an object")
             version = document.get("schema_version")
+            # Only a well-formed integer version can mark a newer manifest that
+            # must be protected; anything else is damage and may use the backup.
+            if type(version) is not int:
+                raise TypeError(f"invalid manifest schema: {version!r}")
             if version != SessionManifest.SCHEMA_VERSION:
                 raise UnsupportedSchemaError(
                     f"unsupported manifest schema: {version!r}"
