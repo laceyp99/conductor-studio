@@ -1,6 +1,7 @@
 """Offline regression coverage for the individual-loop favorites flow."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -542,3 +543,40 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
             assert sidebar["id"] in event["outputs"]
     assert "favorites-sidebar" in ids
     assert "favorites-main" in ids
+
+
+def test_trashing_the_displayed_session_clears_results_and_served_copies(favorites):
+    controller, store, older, newer = favorites
+    app = build_app(controller)
+    shown = controller.reopen(newer.session_id)
+    served = controller.publisher.served_root / newer.session_id
+    assert shown.cards[0].midi_path
+    assert served.is_dir()
+    other = controller.reopen(older.session_id).cards[0].midi_path
+
+    trash = callback(app, "trash_event")
+    results = trash(newer.session_id, newer.session_id, None, ())[14:]
+
+    assert results[33] is None  # active_session no longer names the moved session
+    assert results[5]["value"] is None
+    assert results[5]["visible"] is False
+    assert not served.exists()
+    midi = newer.slot("01").artifacts.midi
+    assert (store.trash_root / newer.session_id / midi).is_file()
+    assert Path(other).is_file()
+
+
+def test_trashing_another_session_keeps_the_displayed_results(favorites):
+    controller, _, older, newer = favorites
+    trash = callback(build_app(controller), "trash_event")
+    results = trash(older.session_id, newer.session_id, None, ())[14:]
+    assert all(value == {"__type__": "update"} for value in results)
+
+
+def test_audio_retry_for_a_session_moved_elsewhere_shows_unavailable(favorites):
+    controller, _, _, newer = favorites
+    controller.trash(newer.session_id)
+    (view,) = controller.retry_audio(newer.session_id, "01")
+    assert view.session_id is None
+    assert "no longer available" in view.notice
+    assert view.generate_enabled

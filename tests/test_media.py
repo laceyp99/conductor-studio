@@ -122,3 +122,13 @@ def test_publisher_reuses_unchanged_media_and_refreshes_replacements(
     published = publisher.publish_path(store, manifest.session_id, "01", relative)
     assert len(copies) == 2
     assert published.read_bytes() == b"retry"
+
+
+@pytest.mark.parametrize("session_id", ["", ".", "..", "../studio", "a/b"])
+def test_unpublish_rejects_identities_outside_the_served_root(
+    tmp_path: Path, session_id: str
+):
+    _, _, publisher = setup_media(tmp_path)
+    with pytest.raises(ContainmentError):
+        publisher.unpublish(session_id)
+    assert publisher.served_root.is_dir()

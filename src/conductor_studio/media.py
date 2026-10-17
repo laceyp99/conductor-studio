@@ -103,6 +103,22 @@ class MediaPublisher:
                 temporary.unlink(missing_ok=True)
         return destination
 
+    def unpublish(self, session_id: str) -> None:
+        """Delete one session's served copies, e.g. after it moves to Trash.
+
+        Only the disposable copies go; the session's own artifacts are untouched.
+        """
+        if session_id in {"", ".", ".."} or Path(session_id).name != session_id:
+            raise ContainmentError("invalid media identity")
+        target = self.served_root / session_id
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ContainmentError("served session cannot be a link or reparse point")
+        shutil.rmtree(target)
+
     def publish_slot(
         self, store: SessionStore, manifest: SessionManifest, slot: VariantSlot
     ) -> dict[str, Path | None]:
