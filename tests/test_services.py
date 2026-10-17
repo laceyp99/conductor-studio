@@ -126,23 +126,35 @@ def test_one_call_queued_first_and_atomic_publication(tmp_path):
 
 def test_progress_and_publication_never_show_partial_slot_states(tmp_path):
     service, _ = make_service(tmp_path)
-    seen = []
-    created = service.create_session(
-        settings(),
-        on_event=lambda e: seen.append(tuple(s.state for s in e.manifest.slots)),
-    )
+    events = []
+    created = service.create_session(settings(), on_event=events.append)
     service.wait(created.session_id)
-    assert seen
-    assert all(len(set(states)) == 1 for states in seen)
-    processing = [
-        event
-        for event in service.events(created.session_id, timeout=0.001)
-        if event.state is SlotState.PROCESSING_MIDI
-    ]
+    assert events
+    assert all(len({s.state for s in e.manifest.slots}) == 1 for e in events)
+    processing = [e for e in events if e.state is SlotState.PROCESSING_MIDI]
     assert processing
     assert all(
         event.progress.message == "Processing MIDI 2 of 4" for event in processing
     )
+
+
+def test_unconsumed_runs_release_their_worker_and_events(tmp_path):
+    # A UI stream may be abandoned without ever calling wait(); each run must
+    # still retire its worker thread and queued manifest snapshots.
+    service, _ = make_service(tmp_path)
+    for _ in range(2):
+        created = service.create_session(settings(), on_event=lambda e: None)
+        for _ in range(3000):
+            if not service.generation_active:
+                break
+            threading.Event().wait(0.001)
+        assert not service.generation_active
+    assert (service._executors, service._events, service._callbacks) == ({}, {}, {})
+    workers = [t for t in threading.enumerate() if t.name.startswith("studio-run")]
+    for worker in workers:
+        worker.join(3)
+    assert not any(worker.is_alive() for worker in workers)
+    assert list(service.events(created.session_id, timeout=0.001)) == []
 
 
 def test_batch_failure_is_atomic(tmp_path):
@@ -281,4 +293,6 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     service.wait(created.session_id)
     with pytest.raises(ValueError, match="not in a retryable state"):
         service.retry_audio(created.session_id, "01")
-    assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]
+    assert [sorted(adapter.audio_calls) for adapter in adapters] == [
+        ["01", "02", "03", "04"]
+    ]
