@@ -158,6 +158,32 @@ def test_batch_failure_is_atomic(tmp_path):
     assert adapters[0].batch_calls == 1
     assert not result.batch.generation_ids
     assert all(s.state is SlotState.FAILED for s in result.slots)
+    assert result.batch.total_cost is None
+
+
+def test_batch_failure_persists_reported_accounting(tmp_path):
+    failure = AdapterFailure(
+        FailureInfo(
+            category=ErrorCategory.VALIDATION,
+            message="The generation batch was invalid.",
+        ),
+        "detail",
+        total_cost=0.12,
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+    )
+    service, adapters = make_service(tmp_path, outcome=failure)
+    result = service.wait(service.create_session(settings()).session_id)
+    assert adapters[0].batch_calls == 1
+    assert (result.batch.batch_id, result.batch.generation_ids) == (None, [])
+    assert all(s.midi is not MidiState.READY for s in result.slots)
+    assert (
+        result.batch.total_cost,
+        result.batch.input_tokens,
+        result.batch.output_tokens,
+        result.batch.total_tokens,
+    ) == (0.12, 10, 20, 30)
 
 
 def test_active_lock_includes_all_concurrent_audio(tmp_path):
