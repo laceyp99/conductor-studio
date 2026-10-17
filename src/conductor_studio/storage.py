@@ -254,6 +254,7 @@ class SessionStore:
                 ) from previous_error
 
     def iter_history(self) -> Iterator[SessionManifest]:
+        """Yield loadable sessions, skipping foreign, linked, or unusable entries."""
         if not self.sessions_root.exists():
             return
         for directory in self.sessions_root.iterdir():
@@ -261,7 +262,7 @@ class SessionStore:
                 continue
             try:
                 yield self.load(directory.name)
-            except ManifestError:
+            except (ContainmentError, ManifestError):
                 continue
 
     def history(self) -> list[SessionManifest]:

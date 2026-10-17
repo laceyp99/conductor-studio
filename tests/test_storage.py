@@ -127,6 +127,27 @@ def test_recovery_interrupts_audio_without_invalidating_completed_midi(
     assert store.recover_startup() == []
 
 
+def test_foreign_session_entries_do_not_block_history_or_recovery(tmp_path) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()  # queued, so startup recovery interrupts it
+    store.create(manifest)
+    (store.sessions_root / "notes").mkdir()
+    (store.sessions_root / "20260829-120001_nomanifest").mkdir()
+    if os.name == "nt":
+        import _winapi
+
+        # Junctions need no elevation and are not reported by is_symlink().
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _winapi.CreateJunction(
+            str(outside), str(store.sessions_root / "20260829-120002_junction")
+        )
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    assert [item.session_id for item in store.recover_startup()] == [
+        manifest.session_id
+    ]
+
+
 def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
