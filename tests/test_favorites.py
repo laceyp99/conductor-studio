@@ -482,9 +482,9 @@ def test_audio_completion_preserves_other_loops_but_reloads_the_retried_loop(
         assert refreshed[7] == {"__type__": "update"}
 
 
-@pytest.mark.parametrize("history_shows_source", [True, False])
+@pytest.mark.parametrize("user_stayed", [True, False])
 def test_favorite_retry_recovers_unavailable_audio_without_generation(
-    favorites, history_shows_source
+    favorites, user_stayed
 ):
     controller, store, older, newer = favorites
     manifest = store.load(newer.session_id)
@@ -517,22 +517,28 @@ def test_favorite_retry_recovers_unavailable_audio_without_generation(
     view = controller.favorites_view(selected)
     assert view.card.audio_retry_visible
     order = tuple(value for _, value in view.choices)
-    session = newer.session_id if history_shows_source else older.session_id
     retry = callback(app, "retry_favorite_audio")
-    *_, final = retry(selected, order, session, selected)
-    assert calls == ["01"]
-    assert final[1] == selected
-    assert final[6] == controller.favorites_view(selected).card.audio_path
-    assert final[8]["interactive"] is True
-    assert final[12]["visible"] is False
-    batch_title = final[13]
-    if history_shows_source:
-        assert "Ready" in batch_title
+    busy, (retried, notice, *_) = retry(selected, selected)
+    assert busy[2]["interactive"] is False
+    assert (calls, retried, notice) == (["01"], selected, "")
+    # The user may move on while audio renders; the refresh uses current state.
+    current = selected if user_stayed else identity(older, "01")
+    session = newer.session_id if user_stayed else older.session_id
+    refreshed = callback(app, "refresh_after_favorite_retry")(
+        current, order, None, None, retried, session
+    )
+    assert refreshed[2] == current
+    assert refreshed[9]["interactive"] is True
+    if user_stayed:
+        assert refreshed[7] == controller.favorites_view(selected).card.audio_path
+        assert refreshed[13]["visible"] is False
+        assert "Ready" in refreshed[14]
     else:
-        assert batch_title == {"__type__": "update"}
+        assert refreshed[14] == {"__type__": "update"}
     # A sidebar choice that has not settled must not retry the previous loop.
-    (pending,) = retry(selected, order, session, identity(older, "01"))
-    assert "finish loading" in pending[10]
+    (pending,) = retry(selected, identity(older, "01"))
+    assert pending[0] is None
+    assert "finish loading" in pending[1]
     assert calls == ["01"]
 
 

@@ -1553,46 +1553,77 @@ def create_app(
         )
 
         def retry_favorite_audio(
-            selected: str | None,
-            previous: tuple[str, ...],
-            session: str | None,
-            chosen: str | None,
+            selected: str | None, chosen: str | None
         ) -> Iterator[tuple[Any, ...]]:
             # Audio-only: reuses the History retry path, which never calls an LLM.
-            skip_batch = [_skip()] * len(app_outputs)
+            # Only the retried identity and notice are written here, so the
+            # follow-up refresh reads whatever the user selected meanwhile.
             if chosen != selected or not selected or "|" not in selected:
-                values = [_skip()] * len(favorite_outputs)
-                values[10] = (
-                    "Wait for the selected loop to finish loading, then try again."
+                yield (
+                    None,
+                    "Wait for the selected loop to finish loading, then try again.",
+                    _skip(),
+                    _skip(),
                 )
-                yield (*values, *skip_batch)
                 return
+            yield (
+                _skip(),
+                _skip(),
+                _update(interactive=False),
+                _update(interactive=False),
+            )
             source_id, slot_id = selected.split("|", 1)
+            notice = ""
             try:
                 for view in controller.retry_audio(source_id, slot_id):
-                    yield (
-                        *refreshed_favorites(selected, previous, notice=view.notice),
-                        # Keep the shared History cards in step when they show it.
-                        *(_view_values(view) if session == source_id else skip_batch),
-                    )
+                    notice = view.notice
             except (StorageError, ContainmentError, OSError):
-                yield (
-                    *refreshed_favorites(
-                        selected,
-                        previous,
-                        notice="This favorite is unavailable. The collection was refreshed.",
-                    ),
-                    *skip_batch,
+                notice = "This favorite is unavailable. The collection was refreshed."
+            yield selected, notice, _skip(), _skip()
+
+        def refresh_after_favorite_retry(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None,
+            retried: str | None,
+            session: str | None,
+        ) -> tuple[Any, ...]:
+            values = list(
+                refresh_after_audio_retry(
+                    selected, previous, history_selected, audio_path, retried
                 )
+            )
+            values[11] = _skip()  # keep the retry notice
+            batch: list[Any] = [_skip()] * len(app_outputs)
+            # Update History cards only if they still show the retried session.
+            if retried and session == retried.split("|", 1)[0]:
+                with suppress(StorageError, ContainmentError, OSError):
+                    batch = _view_values(controller.reopen(session))
+            return (*values, *batch)
 
         favorite_audio_retry.click(
             retry_favorite_audio,
-            [favorite_selection, favorite_order, active_session, favorite_choice],
-            [*favorite_outputs, *app_outputs],
+            [favorite_selection, favorite_choice],
+            [audio_retry_selection, favorite_notice, unfavorite, favorite_audio_retry],
             js=_PAUSE_AUDIO_JS,
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="generation",
+        ).then(
+            refresh_after_favorite_retry,
+            [
+                favorite_selection,
+                favorite_order,
+                history_choice,
+                favorite_audio_path,
+                audio_retry_selection,
+                active_session,
+            ],
+            [history_choice, *favorite_outputs, *app_outputs],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
         )
 
         def refresh_favorite_media(
