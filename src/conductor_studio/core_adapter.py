@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,13 +13,17 @@ from typing import Any
 import conductor_core
 from conductor_core import playback
 from conductor_core.config import ProviderCredentials
+from pydantic import ValidationError
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
 
+_LOGGER = logging.getLogger(__name__)
 _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"\b(?:sk|key|token|ghp|xoxb)[-_][A-Za-z0-9_-]+\b"),
 )
+# Core ValueError text for a model reply that cannot become four variations.
+_MODEL_OUTPUT_ERRORS = ("did not call", "did not include", "wrong_count")
 
 
 @dataclass(frozen=True)
@@ -111,7 +116,7 @@ def _failure(error: BaseException) -> AdapterFailure:
             "Lower or turn off thinking, choose a model with a larger context, "
             "or set a larger Ollama context window.",
         )
-    elif any(
+    elif isinstance(error, conductor_core.ProviderError) or any(
         x in name or x in detail
         for x in (
             "credential",
@@ -123,10 +128,21 @@ def _failure(error: BaseException) -> AdapterFailure:
         )
     ):
         category, message = ErrorCategory.PROVIDER, "Provider request failed."
-    elif isinstance(error, (ValueError, TypeError)):
+    elif isinstance(error, ValidationError) or (
+        isinstance(error, ValueError) and any(x in detail for x in _MODEL_OUTPUT_ERRORS)
+    ):
         category, message = (
             ErrorCategory.VALIDATION,
-            "The generation batch was invalid.",
+            "The model's response did not contain four valid variations. "
+            "Generating again may succeed.",
+        )
+    elif isinstance(error, TypeError):
+        # A TypeError is a Core or dependency bug, not a settings problem.
+        category, message = ErrorCategory.CORE, "Conductor Core failed."
+    elif isinstance(error, ValueError):
+        category, message = (
+            ErrorCategory.VALIDATION,
+            "Conductor Core rejected the generation batch.",
         )
     elif isinstance(error, OSError) or "storage" in name or "file" in name:
         category, message = (
@@ -251,7 +267,12 @@ class CoreAdapter:
 
     def normalize_result(self, result: Any) -> NormalizedBatchResult:
         if getattr(result, "status", None) != "complete":
-            raise ValueError("Core returned an incomplete variation batch")
+            diagnostic = getattr(result, "diagnostic", None)
+            raise ValueError(
+                "Core returned an incomplete variation batch: "
+                f"{getattr(diagnostic, 'code', None)}: "
+                f"{getattr(diagnostic, 'message', None)}"
+            )
         metadata, items = result.metadata, tuple(result.items)
         if metadata.requested_count != 4 or metadata.received_count != 4:
             raise ValueError("Core returned the wrong variation count")
@@ -303,6 +324,12 @@ class CoreAdapter:
         except Exception as error:
             outcome = _failure(error)
             self.last_diagnostic = outcome.diagnostic
+            # Log only the redacted diagnostic, never request payloads.
+            _LOGGER.warning(
+                "Generation batch failed (%s): %s",
+                outcome.failure.category.value,
+                outcome.diagnostic,
+            )
             return outcome
 
     def render_audio(self, manifest: SessionManifest, slot_id: str) -> str | None:
@@ -343,6 +370,9 @@ class CoreAdapter:
             return relative
         except Exception as error:
             self.last_diagnostic = _failure(error).diagnostic
+            _LOGGER.warning(
+                "Audio rendering failed for slot %s: %s", slot_id, self.last_diagnostic
+            )
             slot.audio.state = AudioState.FAILED
             slot.audio.failure = FailureInfo(
                 category=ErrorCategory.AUDIO,
