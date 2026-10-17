@@ -1,6 +1,7 @@
 """Offline regression coverage for the individual-loop favorites flow."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -542,3 +543,52 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
             assert sidebar["id"] in event["outputs"]
     assert "favorites-sidebar" in ids
     assert "favorites-main" in ids
+
+
+def test_trashing_the_displayed_session_clears_results_and_served_copies(favorites):
+    controller, store, older, newer = favorites
+    manifest = store.load(newer.session_id)
+    artifacts = manifest.slot("01").artifacts
+    artifacts.audio = "variants/01/preview.mp3"
+    artifacts.piano_roll = "variants/01/piano-roll.png"
+    store.save(manifest)
+    for relative in (artifacts.audio, artifacts.piano_roll):
+        path = store.session_dir(newer.session_id) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    app = build_app(controller)
+    card = controller.reopen(newer.session_id).cards[0]
+    served = controller.publisher.served_root / newer.session_id
+    assert card.image_path
+    assert card.audio_path
+    assert card.midi_path
+    other = controller.reopen(older.session_id).cards[0].midi_path
+
+    trash = callback(app, "trash_event")
+    results = trash(newer.session_id, newer.session_id, None, ())[14:]
+
+    assert results[33] is None  # active_session no longer names the moved session
+    assert results[3] is None  # piano roll
+    assert results[4] is None  # audio player unloads, stopping playback
+    assert results[5]["value"] is None
+    assert results[5]["visible"] is False
+    assert not served.exists()
+    for relative in (artifacts.audio, artifacts.piano_roll, artifacts.midi):
+        assert (store.trash_root / newer.session_id / relative).is_file()
+    assert Path(other).is_file()
+
+
+def test_trashing_another_session_keeps_the_displayed_results(favorites):
+    controller, _, older, newer = favorites
+    trash = callback(build_app(controller), "trash_event")
+    results = trash(older.session_id, newer.session_id, None, ())[14:]
+    assert all(value == {"__type__": "update"} for value in results)
+
+
+def test_audio_retry_for_a_session_moved_elsewhere_shows_unavailable(favorites):
+    controller, _, _, newer = favorites
+    controller.trash(newer.session_id)
+    (view,) = controller.retry_audio(newer.session_id, "01")
+    assert view.session_id is None
+    assert "no longer available" in view.notice
+    assert view.generate_enabled

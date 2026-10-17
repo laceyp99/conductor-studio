@@ -147,6 +147,13 @@ def _empty_card(slot_id: str) -> CardView:
     )
 
 
+def _blank_view(enabled: bool, notice: str = "") -> AppView:
+    """Results with no session, used when the displayed session is gone."""
+    return AppView(
+        None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), enabled, notice
+    )  # type: ignore[arg-type]
+
+
 def _slot_metadata(manifest: SessionManifest) -> str:
     settings = manifest.settings
     controls = []
@@ -436,10 +443,17 @@ class StudioController:
                 session_id, self.service.retry_audio(session_id, slot_id)
             )
         except Exception as error:
+            enabled = not self.service.generation_active
+            try:
+                manifest = self.service.store.load(session_id)
+            except (StorageError, ContainmentError, OSError):
+                # Another tab may have moved this session to Trash.
+                yield _blank_view(
+                    enabled, "This session is no longer available. Open History."
+                )
+                return
             yield self._view(
-                self.service.store.load(session_id),
-                enabled=not self.service.generation_active,
-                notice=_audio_retry_notice(error),
+                manifest, enabled=enabled, notice=_audio_retry_notice(error)
             )
 
     def toggle_favorite(self, session_id: str | None, slot_id: str) -> AppView:
@@ -561,6 +575,10 @@ class StudioController:
             notice = "Could not move this session to trash."
         else:
             notice = ""
+            # Served copies would keep the moved session downloadable.  The move
+            # already succeeded, so a leftover copy must not report a failure.
+            with suppress(ContainmentError, OSError):
+                self.publisher.unpublish(session_id)
         return replace(_library_view(self.service), notice=notice)
 
     def credentials_view(self) -> CredentialView:
@@ -1632,17 +1650,31 @@ def create_app(
             concurrency_limit=1,
             concurrency_id="library",
         )
-        trash.click(
-            lambda selected, favorite, previous: (
-                _update(
-                    choices=list((view := controller.trash(selected)).history_choices),
-                    value=None,
-                ),
+
+        def trash_event(
+            selected: str | None,
+            displayed: str | None,
+            favorite: str | None,
+            previous: tuple[str, ...],
+        ) -> tuple[Any, ...]:
+            view = controller.trash(selected)
+            # Clear the results only when the displayed session actually moved.
+            results_values: list[Any] = [_skip()] * len(app_outputs)
+            if selected and selected == displayed and not view.notice:
+                results_values = _view_values(
+                    _blank_view(not controller.service.generation_active)
+                )
+            return (
+                _update(choices=list(view.history_choices), value=None),
                 *refreshed_favorites(favorite, previous, notice=view.notice),
                 view.notice,
-            ),
-            [history_choice, favorite_selection, favorite_order],
-            [history_choice, *favorite_outputs, history_notice],
+                *results_values,
+            )
+
+        trash.click(
+            trash_event,
+            [history_choice, active_session, favorite_selection, favorite_order],
+            [history_choice, *favorite_outputs, history_notice, *app_outputs],
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="library",

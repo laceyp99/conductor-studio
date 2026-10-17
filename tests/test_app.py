@@ -24,6 +24,7 @@ from conductor_studio.app import (
 )
 from conductor_studio.catalog import ModelCapability, ModelCatalog
 from conductor_studio.credentials import CredentialStore
+from conductor_studio.media import MediaPublisher
 from conductor_studio.models import (
     AudioInfo,
     AudioState,
@@ -469,10 +470,11 @@ def test_audio_retry_rejections_explain_the_reason(error, notice):
         (StorageError("C:/private/path"), "Could not move this session to trash."),
     ],
 )
-def test_trash_reports_refusals_in_the_library_notice(error, notice):
+def test_trash_reports_refusals_in_the_library_notice(error, notice, tmp_path: Path):
     manifest = _retry_manifest()
     service = _RetryService(manifest, move_error=error)
-    view = StudioController(service, _Catalog(), object(), object()).trash(
+    publisher = MediaPublisher(tmp_path / "served")
+    view = StudioController(service, _Catalog(), object(), publisher).trash(
         manifest.session_id
     )
     assert notice in view.notice if notice else view.notice == ""
@@ -492,7 +494,9 @@ def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
     manifest.refresh_status()
     store.create(manifest)
     service = StudioService(store=store, credentials=CredentialStore(environment={}))
-    controller = StudioController(service, _Catalog(), object(), object())
+    controller = StudioController(
+        service, _Catalog(), object(), MediaPublisher(tmp_path / "served")
+    )
 
     assert controller.trash(manifest.session_id).notice == ""
     second = controller.trash(manifest.session_id)
