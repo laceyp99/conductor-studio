@@ -308,3 +308,49 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     with pytest.raises(ValueError, match="not in a retryable state"):
         service.retry_audio(created.session_id, "01")
     assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]
+
+
+@pytest.mark.parametrize(
+    ("fault", "faulted"),
+    [
+        (lambda s: s.artifacts.loop is not None, "derived"),
+        (lambda s: s.audio.state is AudioState.RENDERING, "audio"),
+        (lambda s: s.audio.state is AudioState.READY, "audio"),
+    ],
+    ids=["derived-save", "audio-start-save", "audio-result-save"],
+)
+def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
+    tmp_path, monkeypatch, fault, faulted
+):
+    service, adapters = make_service(tmp_path)
+    save = service.store.save
+    tripped = []
+
+    def flaky_save(manifest):
+        if not tripped and fault(manifest.slot("01")):
+            tripped.append(True)
+            raise OSError("disk briefly unavailable")
+        return save(manifest)
+
+    monkeypatch.setattr(service.store, "save", flaky_save)
+    created = service.create_session(settings())
+    result = service.wait(created.session_id)
+
+    assert tripped
+    assert result.batch.failure is None
+    assert all(s.midi is MidiState.READY for s in result.slots)
+    assert all(s.audio.state is AudioState.READY for s in result.slots[1:])
+    first = result.slot("01")
+    if faulted == "derived":
+        assert first.artifacts.loop is None
+        assert first.warnings == [
+            "Piano-roll rendering failed; MIDI is still available."
+        ]
+        assert first.audio.state is AudioState.READY
+        return
+    assert first.audio.state is AudioState.FAILED
+    assert first.audio.retryable
+    service.retry_audio(created.session_id, "01")
+    retried = service.wait(created.session_id)
+    assert retried.slot("01").audio.state is AudioState.READY
+    assert [adapter.batch_calls for adapter in adapters] == [1, 0]
