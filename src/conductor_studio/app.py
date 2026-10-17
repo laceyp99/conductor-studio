@@ -370,9 +370,14 @@ class StudioController:
         self, session_id: str, initial: SessionManifest
     ) -> Iterator[AppView]:
         yield self._view(initial, enabled=False)
+        shown = initial
         while self.service.active_session_id == session_id:
             for event in self.service.events(session_id, timeout=0.25):
-                yield self._view(event.manifest, enabled=False)
+                # Each save emits one event per slot carrying the same
+                # manifest, so render each distinct manifest once.
+                if event.manifest != shown:
+                    shown = event.manifest
+                    yield self._view(shown, enabled=False)
         try:
             final = self.service.wait(session_id)
         except Exception:

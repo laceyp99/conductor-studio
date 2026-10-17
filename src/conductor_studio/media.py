@@ -76,24 +76,31 @@ class MediaPublisher:
             raise ContainmentError("derived media must be stored beneath variants")
         source = store.artifact_path(session_id, relative_path)
         destination = self._destination(session_id, slot_id, source)
-        # Copy to a sibling temporary file and replace so Gradio never sees a
-        # partially-written media file during progressive updates.
-        _descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-        )
-        os.close(_descriptor)
-        temporary = Path(temporary_name)
-        try:
-            with temporary.open("wb") as stream:
-                source_stream = source.open("rb")
-                try:
+        with source.open("rb") as source_stream:
+            info = os.fstat(source_stream.fileno())
+            # Copies carry the source size and mtime, so an unchanged artifact
+            # is reused while a same-path replacement is copied again.
+            with suppress(OSError):
+                current = destination.stat()
+                if (current.st_size, current.st_mtime_ns) == (
+                    info.st_size,
+                    info.st_mtime_ns,
+                ):
+                    return destination
+            # Copy to a sibling temporary file and replace so Gradio never sees
+            # a partially-written media file during progressive updates.
+            _descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
+            os.close(_descriptor)
+            temporary = Path(temporary_name)
+            try:
+                with temporary.open("wb") as stream:
                     shutil.copyfileobj(source_stream, stream)
-                finally:
-                    source_stream.close()
-                stream.flush()
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+                os.utime(temporary, ns=(info.st_atime_ns, info.st_mtime_ns))
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
         return destination
 
     def publish_slot(
