@@ -93,3 +93,13 @@ def test_publish_slot_isolates_copy_failure_and_keeps_other_media(
     assert result["piano_roll"] is None
     assert result["audio"] is None
     assert result["midi"].read_bytes() == b"midi"
+
+
+@pytest.mark.parametrize("session_id", ["", ".", "..", "../studio", "a/b"])
+def test_unpublish_rejects_identities_outside_the_served_root(
+    tmp_path: Path, session_id: str
+):
+    _, _, publisher = setup_media(tmp_path)
+    with pytest.raises(ContainmentError):
+        publisher.unpublish(session_id)
+    assert publisher.served_root.is_dir()
