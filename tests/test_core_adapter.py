@@ -6,7 +6,9 @@ from conductor_core import (
     ProgressEvent,
     ProviderContextLengthError,
     ProviderCredentials,
+    routing,
 )
+from conductor_core.models import Bar, Loop, Note, TimeInformation
 
 from conductor_studio.core_adapter import (
     AdapterFailure,
@@ -147,6 +149,47 @@ def test_symlinked_midi_is_rejected(tmp_path):
         pytest.skip("symlinks are unavailable")
     with pytest.raises(ValueError, match="unsafe"):
         CoreAdapter(tmp_path).normalize_result(result)
+
+
+def test_core_records_omit_provider_messages_and_absolute_paths(tmp_path, monkeypatch):
+    marker = "private-request-marker"
+    note = Note(
+        pitch="C",
+        octave=4,
+        velocity=90,
+        time=TimeInformation(start_beat=1, duration=4),
+    )
+    loop = Loop(
+        Bar_1=Bar(num=1, notes=[note]),
+        Bar_2=Bar(num=2, notes=[]),
+        Bar_3=Bar(num=3, notes=[]),
+        Bar_4=Bar(num=4, notes=[]),
+    )
+    monkeypatch.setattr(
+        routing,
+        "generate_variations",
+        lambda **_: routing.VariationProviderResult(
+            variations=(loop,) * 4,
+            provider="OpenAI",
+            messages=[{"role": "user", "content": marker}],
+            usage=None,
+            cost=None,
+        ),
+    )
+
+    adapter = CoreAdapter(tmp_path)
+    outcome = adapter.generate_batch(_manifest())
+
+    assert isinstance(outcome, NormalizedBatchResult), adapter.last_diagnostic
+    records = list(tmp_path.rglob("*.json"))
+    assert len(records) == 5
+    for record in records:
+        text = record.read_text(encoding="utf-8")
+        assert marker not in text
+        assert tmp_path.name not in text
+    history = adapter._engine.store.list_variation_history()
+    assert history.diagnostics == ()
+    assert len(history.records[0].generations) == 4
 
 
 def test_provider_error_is_sanitized(tmp_path):
