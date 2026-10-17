@@ -14,6 +14,7 @@ from conductor_core import playback
 from conductor_core.config import ProviderCredentials
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
+from .storage import derived_output_path
 
 _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
@@ -317,10 +318,10 @@ class CoreAdapter:
         ready, message = self.audio_readiness()
         if not ready:
             return self._unavailable(slot, message)
-        output = self.session_root / "variants" / slot_id / "preview.mp3"
-        output.parent.mkdir(parents=True, exist_ok=True)
+        parts = ("variants", slot_id, "preview.mp3")
         slot.audio.state = AudioState.RENDERING
         try:
+            output = derived_output_path(self.session_root, *parts)
             soundfont = self.default_soundfont_path
             if soundfont is None and hasattr(self.playback, "get_default_soundfont"):
                 soundfont = self.playback.get_default_soundfont()
@@ -331,7 +332,11 @@ class CoreAdapter:
                     str(midi), output_path=str(output), soundfont_name=soundfont
                 )
             ).resolve()
-            if rendered != output.resolve() or not rendered.is_file():
+            # Re-check the path so a link planted during rendering is refused.
+            if (
+                rendered != derived_output_path(self.session_root, *parts)
+                or not rendered.is_file()
+            ):
                 raise ValueError("audio renderer returned an unsafe path")
             relative = output.relative_to(self.session_root).as_posix()
             slot.artifacts.audio = relative
