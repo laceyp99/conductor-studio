@@ -547,22 +547,34 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
 
 def test_trashing_the_displayed_session_clears_results_and_served_copies(favorites):
     controller, store, older, newer = favorites
+    manifest = store.load(newer.session_id)
+    artifacts = manifest.slot("01").artifacts
+    artifacts.audio = "variants/01/preview.mp3"
+    artifacts.piano_roll = "variants/01/piano-roll.png"
+    store.save(manifest)
+    for relative in (artifacts.audio, artifacts.piano_roll):
+        path = store.session_dir(newer.session_id) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
     app = build_app(controller)
-    shown = controller.reopen(newer.session_id)
+    card = controller.reopen(newer.session_id).cards[0]
     served = controller.publisher.served_root / newer.session_id
-    assert shown.cards[0].midi_path
-    assert served.is_dir()
+    assert card.image_path
+    assert card.audio_path
+    assert card.midi_path
     other = controller.reopen(older.session_id).cards[0].midi_path
 
     trash = callback(app, "trash_event")
     results = trash(newer.session_id, newer.session_id, None, ())[14:]
 
     assert results[33] is None  # active_session no longer names the moved session
+    assert results[3] is None  # piano roll
+    assert results[4] is None  # audio player unloads, stopping playback
     assert results[5]["value"] is None
     assert results[5]["visible"] is False
     assert not served.exists()
-    midi = newer.slot("01").artifacts.midi
-    assert (store.trash_root / newer.session_id / midi).is_file()
+    for relative in (artifacts.audio, artifacts.piano_roll, artifacts.midi):
+        assert (store.trash_root / newer.session_id / relative).is_file()
     assert Path(other).is_file()
 
 
