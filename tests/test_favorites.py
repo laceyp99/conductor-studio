@@ -291,7 +291,7 @@ def test_source_callback_loads_history_and_handles_trashed_source(favorites):
     assert result[40]["visible"] is True
     controller.trash(newer.session_id)
     stale = callback(app, "open_source_event")(view.selection, order, view.selection)
-    assert "unavailable" in stale[-2]
+    assert "unavailable" in stale[51]
     assert newer.session_id not in stale[42]
 
 
@@ -332,11 +332,11 @@ def test_refresh_clears_audio_that_disappeared_and_preserves_history_selection(
     assert missing[0]["value"] is None
     assert missing[7] is None
     assert "audio preview" in missing[5]["value"]
-    assert missing[-1] is None
+    assert missing[12] is None
     audio.write_bytes(b"ID3")
-    restored = refresh(selected, order, newer.session_id, missing[-1])
+    restored = refresh(selected, order, newer.session_id, missing[12])
     assert restored[7] == view.card.audio_path
-    assert restored[-1] == view.card.audio_path
+    assert restored[12] == view.card.audio_path
 
 
 def test_unfavorite_callback_refreshes_sidebar_batch_labels_and_history(favorites):
@@ -350,7 +350,7 @@ def test_unfavorite_callback_refreshes_sidebar_batch_labels_and_history(favorite
     )
     assert not store.load(newer.session_id).slot("01").favorite
     assert result[1] == identity(newer, "03")
-    assert result[12 + 6]["value"] == "\u2606 Favorite"
+    assert result[13 + 6]["value"] == "\u2606 Favorite"
     assert result[-1]["value"] == newer.session_id
     assert newer.session_id in [value for _, value in result[-1]["choices"]]
 
@@ -367,7 +367,7 @@ def test_pending_sidebar_selection_cannot_remove_or_open_the_previous_loop(favor
     assert store.load(newer.session_id).slot("01").favorite
     assert store.load(older.session_id).slot("03").favorite
     assert "finish loading" in result[10]
-    assert all(value == {"__type__": "update"} for value in result[12:])
+    assert all(value == {"__type__": "update"} for value in result[13:])
     source = callback(app, "open_source_event")(selected, order, chosen)
     assert all(value == {"__type__": "update"} for value in source[:41])
     assert "finish loading" in source[51]
@@ -441,7 +441,7 @@ def test_retry_completion_refreshes_favorite_opened_during_audio_work(
     assert refreshed[9]["interactive"] is True
     if succeeds:
         assert refreshed[7] == controller.favorites_view(selected).card.audio_path
-        assert refreshed[-1] == refreshed[7]
+        assert refreshed[12] == refreshed[7]
     else:
         assert refreshed[7] is None
         assert "Audio rendering failed" in refreshed[5]["value"]
@@ -480,6 +480,79 @@ def test_audio_completion_preserves_other_loops_but_reloads_the_retried_loop(
         assert refreshed[7] == view.card.audio_path
     else:
         assert refreshed[7] == {"__type__": "update"}
+
+
+@pytest.mark.parametrize("history_shows_source", [True, False])
+def test_favorite_retry_recovers_unavailable_audio_without_generation(
+    favorites, history_shows_source
+):
+    controller, store, older, newer = favorites
+    manifest = store.load(newer.session_id)
+    manifest.slot("01").audio = AudioInfo(
+        state=AudioState.UNAVAILABLE,
+        retryable=False,
+        failure=FailureInfo(
+            category=ErrorCategory.AUDIO, message="Audio unavailable fixture"
+        ),
+    )
+    store.save(manifest)
+    calls = []
+
+    class Adapter:
+        def generate_batch(self, *args):
+            pytest.fail("favorite audio retry must not generate a batch")
+
+        def render_audio(self, manifest, slot_id):
+            calls.append(slot_id)
+            slot = manifest.slot(slot_id)
+            slot.artifacts.audio = f"variants/{slot_id}/preview.mp3"
+            path = store.session_dir(manifest.session_id) / slot.artifacts.audio
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"ID3")
+            slot.audio = AudioInfo(state=AudioState.READY)
+
+    controller.service.adapter_factory = lambda *args: Adapter()
+    app = build_app(controller)
+    selected = identity(newer, "01")
+    view = controller.favorites_view(selected)
+    assert view.card.audio_retry_visible
+    order = tuple(value for _, value in view.choices)
+    session = newer.session_id if history_shows_source else older.session_id
+    retry = callback(app, "retry_favorite_audio")
+    *_, final = retry(selected, order, session, selected)
+    assert calls == ["01"]
+    assert final[1] == selected
+    assert final[6] == controller.favorites_view(selected).card.audio_path
+    assert final[8]["interactive"] is True
+    assert final[12]["visible"] is False
+    batch_title = final[13]
+    if history_shows_source:
+        assert "Ready" in batch_title
+    else:
+        assert batch_title == {"__type__": "update"}
+    # A sidebar choice that has not settled must not retry the previous loop.
+    (pending,) = retry(selected, order, session, identity(older, "01"))
+    assert "finish loading" in pending[10]
+    assert calls == ["01"]
+
+
+def test_refresh_media_republishes_restored_midi_and_keeps_selection(favorites):
+    controller, store, older, _ = favorites
+    selected = identity(older, "03")
+    midi = store.session_dir(older.session_id) / older.slot("03").artifacts.midi
+    midi.unlink()
+    app = build_app(controller)
+    order = tuple(value for _, value in controller.favorites_view(selected).choices)
+    refresh = callback(app, "refresh_favorite_media")
+    missing = refresh(selected, order)
+    assert missing[1] == selected
+    assert missing[7]["visible"] is False
+    assert "MIDI" in missing[4]["value"]
+    midi.write_bytes(b"MThd")
+    restored = refresh(selected, order)
+    assert restored[1] == selected
+    assert restored[7]["visible"] is True
+    assert restored[4]["visible"] is False
 
 
 def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favorites):

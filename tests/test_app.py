@@ -207,7 +207,8 @@ def test_create_app_has_batch_controls_four_cards_and_no_provider_retry(tmp_path
         slider["props"]["value"],
     ) == (0.0, 1.0, 0.1, 0.7)
     assert "Retry" not in button_values
-    assert button_values.count("Retry audio") == 4
+    # Four cards plus the selected favorite.
+    assert button_values.count("Retry audio") == 5
     assert "Generate Variations" in button_values
     audio_players = [
         component for component in config["components"] if component["type"] == "audio"
@@ -514,13 +515,14 @@ def test_controller_prompt_validation_and_masked_credential_status():
     assert "present" not in status
 
 
-def test_card_shows_nonretryable_audio_readiness_without_batch_error():
+def test_card_offers_retry_for_unavailable_audio_once_midi_is_saved():
     manifest = create_manifest(
         SessionSettings(prompt="motif", provider="OpenAI", model="test"),
         core_version="0.5.3",
     )
     slot = manifest.slot("01")
     slot.midi = MidiState.READY
+    blank = {"piano_roll": None, "audio": None, "midi": None}
     slot.audio = AudioInfo(
         state=AudioState.UNAVAILABLE,
         failure=FailureInfo(
@@ -529,9 +531,12 @@ def test_card_shows_nonretryable_audio_readiness_without_batch_error():
         ),
         retryable=False,
     )
-    card = _card_view(manifest, slot, {"piano_roll": None, "audio": None, "midi": None})
+    card = _card_view(manifest, slot, blank)
     assert "install FluidSynth" in card.warning
-    assert card.audio_retry_visible is False
+    assert card.audio_retry_visible is False  # no saved MIDI to render
+    slot.artifacts.midi = "core/generations/gen-0/loop.mid"
+    # The persisted flag predates repairable readiness and must not hide retry.
+    assert _card_view(manifest, slot, blank).audio_retry_visible is True
 
 
 def _capability(
