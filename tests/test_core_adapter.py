@@ -247,6 +247,25 @@ def test_batch_failures_are_specific_and_logged(
     ]
 
 
+@pytest.mark.parametrize("path", [r"C:\Users\pat\studio\gen.mid", "/home/pat/gen.mid"])
+def test_logged_diagnostic_omits_local_paths(tmp_path, caplog, path):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise PermissionError(13, "Permission denied", path)
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert (
+        outcome.diagnostic == "PermissionError: [Errno 13] Permission denied: '[path]'"
+    )
+    assert "gen.mid" not in caplog.text
+
+
 def test_wrong_count_failure_logs_core_diagnostic_without_secrets(tmp_path, caplog):
     class Engine:
         def __init__(self, config):

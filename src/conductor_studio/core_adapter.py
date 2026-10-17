@@ -24,6 +24,8 @@ _SECRETS = (
 )
 # Core ValueError text for a model reply that cannot become four variations.
 _MODEL_OUTPUT_ERRORS = ("did not call", "did not include", "wrong_count")
+# Absolute Windows or POSIX paths; logged diagnostics must not expose local paths.
+_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|(?<![\w:/.])/)[^\s'",;]*""")
 
 
 @dataclass(frozen=True)
@@ -157,7 +159,7 @@ def _failure(error: BaseException) -> AdapterFailure:
         category, message = ErrorCategory.UNKNOWN, "Generation failed."
     return AdapterFailure(
         FailureInfo(category=category, message=message),
-        f"{type(error).__name__}: {_safe(error, 1000)}",
+        f"{type(error).__name__}: {_safe(_PATHS.sub('[path]', str(error)), 1000)}",
     )
 
 
