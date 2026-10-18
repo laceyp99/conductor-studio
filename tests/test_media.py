@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -93,3 +95,30 @@ def test_publish_slot_isolates_copy_failure_and_keeps_other_media(
     assert result["piano_roll"] is None
     assert result["audio"] is None
     assert result["midi"].read_bytes() == b"midi"
+
+
+def test_publisher_reuses_unchanged_media_and_refreshes_replacements(
+    tmp_path, monkeypatch
+):
+    store, manifest, publisher = setup_media(tmp_path)
+    relative = "variants/01/preview.mp3"
+    source = store.session_dir(manifest.session_id) / relative
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"first")
+    copies = []
+    copy = shutil.copyfileobj
+    monkeypatch.setattr(
+        shutil, "copyfileobj", lambda *args: copies.append(1) or copy(*args)
+    )
+
+    for _ in range(3):
+        published = publisher.publish_path(store, manifest.session_id, "01", relative)
+    assert len(copies) == 1
+
+    # A same-path, same-size audio retry must still replace the served copy.
+    source.write_bytes(b"retry")
+    stamp = source.stat().st_mtime_ns + 1_000_000_000
+    os.utime(source, ns=(stamp, stamp))
+    published = publisher.publish_path(store, manifest.session_id, "01", relative)
+    assert len(copies) == 2
+    assert published.read_bytes() == b"retry"

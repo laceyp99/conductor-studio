@@ -1007,3 +1007,25 @@ def test_accounting_is_session_level_and_omits_unavailable_fields():
     view = _view_for_manifest(manifest)
     assert view.accounting == "Cost $0.012000 · Input 10 tokens"
     assert view.batch_error == ""
+
+
+def test_stream_renders_each_distinct_manifest_once():
+    manifest = _retry_manifest()
+    changed = manifest.model_copy(deep=True)
+    changed.title = "Changed"
+    service = _RetryService(manifest)
+    service.active_session_id = manifest.session_id
+
+    def events(session_id, *, timeout=None):
+        # Mirrors StudioService._emit: one event per slot for every save.
+        for saved in (manifest, changed):
+            for _slot in range(4):
+                yield SimpleNamespace(manifest=saved.model_copy(deep=True))
+        service.active_session_id = None
+
+    service.events = events
+    controller = StudioController(service, _Catalog(), object(), object())
+    rendered = []
+    controller._view = lambda m, **_: rendered.append(m.title)
+    list(controller.retry_audio(manifest.session_id, "01"))
+    assert rendered == [manifest.title, "Changed", manifest.title]
