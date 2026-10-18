@@ -17,6 +17,7 @@ from conductor_studio.storage import (
     SessionBusyError,
     SessionStore,
     StorageError,
+    UnsupportedSchemaError,
 )
 
 
@@ -60,6 +61,33 @@ def test_corrupt_current_recovers_previous(tmp_path) -> None:
     store.save(manifest)
     (store.session_dir(manifest.session_id) / "session.json").write_text("{not json")
     assert store.load(manifest.session_id).status.value == "queued"
+
+
+@pytest.mark.parametrize("damaged", ["[]", "null", "{}", '{"schema_version": "1"}'])
+def test_malformed_manifest_shape_recovers_previous(tmp_path, damaged) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()
+    store.create(manifest)
+    manifest.status = "running"
+    store.save(manifest)
+    (store.session_dir(manifest.session_id) / "session.json").write_text(damaged)
+    assert store.load(manifest.session_id).status.value == "queued"
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    recovered = store.recover_startup()
+    assert [item.status.value for item in recovered] == ["interrupted"]
+
+
+def test_future_schema_is_not_recovered_or_rewritten(tmp_path) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()
+    store.create(manifest)
+    store.save(manifest)
+    current = store.session_dir(manifest.session_id) / "session.json"
+    current.write_text('{"schema_version": 2}')
+    with pytest.raises(UnsupportedSchemaError):
+        store.load(manifest.session_id)
+    assert store.recover_startup() == []
+    assert current.read_text() == '{"schema_version": 2}'
 
 
 def test_recovery_interrupts_batch_and_automatic_audio_atomically(tmp_path) -> None:
