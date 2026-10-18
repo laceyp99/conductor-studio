@@ -15,6 +15,7 @@ from conductor_studio.app import (
     _audio_retry_callback,
     _card_view,
     _control_values,
+    _credential_values,
     _empty_card,
     _ollama_values,
     _slot_metadata,
@@ -792,6 +793,58 @@ def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
     assert "Ollama: Session override (http://gpu-box:11434)" in status
     assert "sk-first" not in status
     assert "pw" not in status
+
+
+def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host():
+    models = {"http://host-a:11434": ["alpha"], "http://host-b:11434": ["beta"]}
+    calls = []
+
+    def list_models(*, host_address, **_):
+        calls.append(("list", host_address))
+        return models[host_address]
+
+    def inspect(*, model_name, host_address, **_):
+        calls.append(("show", host_address, model_name))
+        return {"model_capabilities": {}}
+
+    catalog = ModelCatalog(ollama_list_loader=list_models, ollama_model_loader=inspect)
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials, object())
+    _ollama_values(controller, "", "Ollama", True)
+    assert calls[-1] == ("show", "http://host-a:11434", "alpha")
+
+    def save(host):
+        return lambda: controller.save_credentials("", "", "", host)
+
+    provider, model, *_ = _credential_values(
+        controller, save("http://host-b:11434"), "Ollama"
+    )
+    assert model["value"] == "beta"
+    assert calls[-2:] == [
+        ("list", "http://host-b:11434"),
+        ("show", "http://host-b:11434", "beta"),
+    ]
+    assert catalog.lookup("Ollama", "beta").available
+    assert credentials.provider_credentials().ollama_host == "http://host-b:11434"
+
+    # An unchanged host or a cloud-only change leaves discovery alone.
+    before = list(calls)
+    _credential_values(controller, save("http://host-b:11434"), "Ollama")
+    _credential_values(
+        controller, lambda: controller.save_credentials("sk", "", "", ""), "Ollama"
+    )
+    assert calls == before
+
+    # Clearing falls back to the environment host; a cloud selection is kept.
+    provider, model, *_, status = _credential_values(
+        controller, controller.clear_credentials, "OpenAI"
+    )
+    assert provider["value"] == "OpenAI"
+    assert calls[-1] == ("list", "http://host-a:11434")
+    assert catalog.ollama_status().models == ("alpha",)
+    assert "host-a" in status
 
 
 def test_control_transitions_preserve_only_supported_values():
