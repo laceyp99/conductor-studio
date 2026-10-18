@@ -376,8 +376,14 @@ class SessionStore:
                 raise StorageError(f"trash destination already exists: {session_id}")
             # os.replace moves the directory atomically when roots share a
             # volume (the normal ~/.conductor layout), and never copies only a
-            # subset of the artifacts.
-            os.replace(source, destination)
+            # subset of the artifacts.  Locked files or permission failures
+            # leave the source untouched and surface as StorageError.
+            try:
+                os.replace(source, destination)
+            except OSError as exc:
+                raise StorageError(
+                    f"could not move session to trash: {session_id}"
+                ) from exc
             return destination
 
 

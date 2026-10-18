@@ -480,7 +480,7 @@ def test_trash_reports_refusals_in_the_library_notice(error, notice):
     assert service.trashed == ([] if error else [manifest.session_id])
 
 
-def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+def _terminal_store(tmp_path: Path):
     store = SessionStore(tmp_path / "studio")
     manifest = _retry_manifest()
     manifest.batch.batch_id = "batch-1"
@@ -493,12 +493,32 @@ def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
     store.create(manifest)
     service = StudioService(store=store, credentials=CredentialStore(environment={}))
     controller = StudioController(service, _Catalog(), object(), object())
+    return store, manifest, controller
+
+
+def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+    store, manifest, controller = _terminal_store(tmp_path)
 
     assert controller.trash(manifest.session_id).notice == ""
     second = controller.trash(manifest.session_id)
     assert second.notice == "This session was already moved or is missing."
     assert str(tmp_path) not in second.notice
     assert store.load(manifest.session_id, in_trash=True).terminal
+
+
+def test_trash_filesystem_failure_shows_notice_and_keeps_session(
+    tmp_path: Path, monkeypatch
+):
+    store, manifest, controller = _terminal_store(tmp_path)
+
+    def locked(source, destination):
+        raise PermissionError(13, "Access is denied", str(source))
+
+    monkeypatch.setattr("conductor_studio.storage.os.replace", locked)
+    view = controller.trash(manifest.session_id)
+
+    assert view.notice == "Could not move this session to trash."
+    assert store.load(manifest.session_id).session_id == manifest.session_id
 
 
 def test_controller_prompt_validation_and_masked_credential_status():
