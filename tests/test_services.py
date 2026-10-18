@@ -201,16 +201,24 @@ def test_active_lock_includes_all_concurrent_audio(tmp_path):
     assert service.active_session_id is None
 
 
-def test_audio_retry_does_not_call_provider(tmp_path):
+@pytest.mark.parametrize(
+    ("state", "retryable"),
+    [
+        (AudioState.FAILED, True),
+        # Saved before audio tools were repaired; the old flag must not block.
+        (AudioState.UNAVAILABLE, False),
+    ],
+)
+def test_audio_retry_does_not_call_provider(tmp_path, state, retryable):
     service, adapters = make_service(tmp_path)
     created = service.create_session(settings())
     result = service.wait(created.session_id)
     slot = result.slot("01")
     slot.artifacts.audio = None
     slot.audio = AudioInfo(
-        state=AudioState.FAILED,
+        state=state,
         failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
-        retryable=True,
+        retryable=retryable,
     )
     service.store.save(result)
     service.retry_audio(created.session_id, "01")

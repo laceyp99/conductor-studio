@@ -20,7 +20,6 @@ from .models import (
     AudioState,
     ErrorCategory,
     FailureInfo,
-    MidiState,
     Progress,
     SessionManifest,
     SessionSettings,
@@ -371,13 +370,7 @@ class StudioService:
     def retry_audio(self, session_id, slot_id):
         manifest = self.store.load(session_id)
         slot = manifest.slot(slot_id)
-        if slot.midi is not MidiState.READY or not slot.artifacts.midi:
-            raise ValueError("audio retry requires a valid persisted MIDI artifact")
-        if not slot.audio.retryable or slot.audio.state not in {
-            AudioState.FAILED,
-            AudioState.UNAVAILABLE,
-            AudioState.INTERRUPTED,
-        }:
+        if not slot.audio_retryable:
             raise ValueError("audio is not in a retryable state")
         self.store.artifact_path(session_id, slot.artifacts.midi)
         with self._state_lock:

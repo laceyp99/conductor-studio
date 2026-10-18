@@ -228,6 +228,8 @@ class AudioInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: AudioState = AudioState.NOT_ATTEMPTED
     failure: FailureInfo | None = None
+    # Informational only; VariantSlot.audio_retryable decides retry eligibility
+    # so older manifests with unavailable audio stay recoverable.
     retryable: bool = False
 
     @model_validator(mode="after")
@@ -282,6 +284,20 @@ class VariantSlot(BaseModel):
         if self.finished_at is not None and self.state not in TERMINAL_SLOT_STATES:
             raise ValueError("only terminal slots have finished_at")
         return self
+
+    @property
+    def audio_retryable(self) -> bool:
+        """Whether saved MIDI may be re-rendered to audio.
+
+        Unavailable audio counts so a repaired FluidSynth/FFmpeg/SoundFont setup
+        or a restored MIDI file can be retried; each render rechecks both.
+        """
+        return (
+            self.midi is MidiState.READY
+            and bool(self.artifacts.midi)
+            and self.audio.state
+            in {AudioState.FAILED, AudioState.UNAVAILABLE, AudioState.INTERRUPTED}
+        )
 
 
 TERMINAL_SLOT_STATES = frozenset(
