@@ -28,7 +28,7 @@ from .models import (
     utc_now,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore
+from .storage import SessionStore, derived_output_path
 from .variation import create_manifest
 
 
@@ -206,12 +206,11 @@ class StudioService:
         loop_ref = image_ref = None
         warning = None
         try:
-            root = (
-                self.store.session_dir(session_id, must_exist=True)
-                / "variants"
-                / slot_id
+            session_root = self.store.session_dir(session_id, must_exist=True)
+            loop_path = derived_output_path(
+                session_root, "variants", slot_id, "loop.json"
             )
-            root.mkdir(parents=True, exist_ok=True)
+            root = loop_path.parent
             document = (
                 item.loop.model_dump(mode="json")
                 if hasattr(item.loop, "model_dump")
@@ -225,11 +224,16 @@ class StudioService:
                     handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temp, root / "loop.json")
+                os.replace(temp, loop_path)
             finally:
                 temp.unlink(missing_ok=True)
             loop_ref = f"variants/{slot_id}/loop.json"
-            image = self.renderer(item.loop, root / "piano-roll.png")
+            image = self.renderer(
+                item.loop,
+                derived_output_path(
+                    session_root, "variants", slot_id, "piano-roll.png"
+                ),
+            )
             image_ref = f"variants/{slot_id}/{Path(image).name}"
         except Exception:
             warning = "Piano-roll rendering failed; MIDI is still available."

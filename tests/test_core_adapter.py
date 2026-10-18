@@ -268,6 +268,59 @@ def test_audio_only_render_uses_variant_preview(tmp_path):
     assert slot.audio.state is AudioState.READY
 
 
+def test_audio_render_refuses_variants_junction_escape(tmp_path, link_dir):
+    session = tmp_path / "session"
+    midi = session / "core" / "generations" / "gen" / "loop.mid"
+    midi.parent.mkdir(parents=True)
+    midi.write_bytes(b"MThd")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link_dir(session / "variants", outside)
+
+    class Playback:
+        @staticmethod
+        def midi_to_mp3(midi_path, output_path, soundfont_name):
+            Path(output_path).write_bytes(b"ID3")
+            return output_path
+
+    manifest = _manifest()
+    slot = manifest.slot("01")
+    slot.midi, slot.artifacts.midi = MidiState.READY, "core/generations/gen/loop.mid"
+    adapter = CoreAdapter(session, playback_factory=Playback)
+    assert adapter.render_audio(manifest, "01") is None
+    assert slot.audio.state is AudioState.FAILED
+    assert slot.artifacts.audio is None
+    assert list(outside.iterdir()) == []
+
+
+def test_audio_render_refuses_link_planted_during_render(tmp_path, link_dir):
+    session = tmp_path / "session"
+    midi = session / "core" / "generations" / "gen" / "loop.mid"
+    midi.parent.mkdir(parents=True)
+    midi.write_bytes(b"MThd")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class Playback:
+        @staticmethod
+        def midi_to_mp3(midi_path, output_path, soundfont_name):
+            slot_dir = Path(output_path).parent
+            slot_dir.rmdir()
+            link_dir(slot_dir, outside)
+            Path(output_path).write_bytes(b"ID3")
+            return output_path
+
+    manifest = _manifest()
+    slot = manifest.slot("01")
+    slot.midi, slot.artifacts.midi = MidiState.READY, "core/generations/gen/loop.mid"
+    assert (
+        CoreAdapter(session, playback_factory=Playback).render_audio(manifest, "01")
+        is None
+    )
+    assert slot.audio.state is AudioState.FAILED
+    assert slot.artifacts.audio is None
+
+
 def test_audio_readiness_prevents_render(tmp_path):
     midi = tmp_path / "core" / "generations" / "gen" / "loop.mid"
     midi.parent.mkdir(parents=True)

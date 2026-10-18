@@ -20,6 +20,7 @@ from conductor_studio.models import (
 )
 from conductor_studio.services import ActiveSessionError, StudioService
 from conductor_studio.storage import SessionStore
+from conductor_studio.variation import create_manifest
 
 
 def settings():
@@ -308,3 +309,17 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     with pytest.raises(ValueError, match="not in a retryable state"):
         service.retry_audio(created.session_id, "01")
     assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]
+
+
+def test_derived_writes_refuse_variants_junction_escape(tmp_path, link_dir):
+    store = SessionStore(tmp_path / "studio")
+    service = StudioService(store=store, renderer=lambda loop, path: path)
+    created = store.create(create_manifest(settings(), core_version="1"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link_dir(store.session_dir(created.session_id) / "variants", outside)
+
+    service._derived(created.session_id, NormalizedBatchItem(0, "g", "m", {}, ()))
+    slot = store.load(created.session_id).slots[0]
+    assert (slot.artifacts.loop, slot.artifacts.piano_roll) == (None, None)
+    assert list(outside.iterdir()) == []

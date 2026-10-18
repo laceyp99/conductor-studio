@@ -387,6 +387,21 @@ class SessionStore:
             return destination
 
 
+def derived_output_path(session_root: Path, *parts: str) -> Path:
+    """Return a contained ``session_root/parts`` file path for a derived write.
+
+    Loop JSON, piano-roll, and audio writers call this before writing so a
+    planted junction or symlink (for example ``variants`` -> elsewhere) cannot
+    redirect output outside the session. Parent folders are created only after
+    their existing components pass the link check, and the path is checked
+    again once they exist.
+    """
+    target = Path(session_root).joinpath(*parts)
+    SessionStore._reject_reparse(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return SessionStore._contained(target, Path(session_root))
+
+
 __all__ = [
     "MANIFEST_NAME",
     "PREVIOUS_MANIFEST_NAME",
@@ -396,4 +411,5 @@ __all__ = [
     "SessionStore",
     "StorageError",
     "UnsupportedSchemaError",
+    "derived_output_path",
 ]
