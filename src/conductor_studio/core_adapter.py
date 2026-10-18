@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,10 @@ class NormalizedBatchResult:
 class AdapterFailure:
     failure: FailureInfo
     diagnostic: str
+    total_cost: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 BatchOutcome = NormalizedBatchResult | AdapterFailure
@@ -100,6 +104,18 @@ def _safe(value: Any, limit: int = 500) -> str:
     for pattern in _SECRETS:
         text = pattern.sub("[redacted]", text)
     return " ".join(text.split())[:limit]
+
+
+def _accounting(result: Any) -> dict[str, Any]:
+    """Read cost and token usage from a Core batch result, failed or not."""
+    metadata = getattr(result, "metadata", None)
+    usage = getattr(metadata, "usage", None)
+    return {
+        "total_cost": getattr(metadata, "cost", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 def _failure(error: BaseException) -> AdapterFailure:
@@ -273,15 +289,8 @@ class CoreAdapter:
             )
             for item in items
         )
-        usage = metadata.usage
         return NormalizedBatchResult(
-            batch_id,
-            normalized,
-            self.core_version(),
-            metadata.cost,
-            getattr(usage, "input_tokens", None),
-            getattr(usage, "output_tokens", None),
-            getattr(usage, "total_tokens", None),
+            batch_id, normalized, self.core_version(), **_accounting(result)
         )
 
     def generate_batch(
@@ -293,15 +302,16 @@ class CoreAdapter:
             if progress_callback:
                 progress_callback(self.normalize_progress(event))
 
+        result = None
         try:
             engine = self._engine or self.build_engine()
-            return self.normalize_result(
-                engine.generate_variations(
-                    self.build_request(manifest), progress_callback=forward
-                )
+            result = engine.generate_variations(
+                self.build_request(manifest), progress_callback=forward
             )
+            return self.normalize_result(result)
         except Exception as error:
-            outcome = _failure(error)
+            # A rejected result still came from a charged request; keep its usage.
+            outcome = replace(_failure(error), **_accounting(result))
             self.last_diagnostic = outcome.diagnostic
             return outcome
 
