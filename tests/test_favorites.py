@@ -24,7 +24,7 @@ from conductor_studio.models import (
     SlotState,
 )
 from conductor_studio.services import ActiveSessionError, StudioService
-from conductor_studio.storage import SessionStore
+from conductor_studio.storage import SessionStore, StorageError
 
 
 def saved_session(store, day, favorite_slots=("01", "03")):
@@ -574,6 +574,58 @@ def test_deleting_another_session_keeps_the_displayed_results(favorites):
     delete = callback(build_app(controller), "delete_event")
     results = delete(older.session_id, newer.session_id, None, ())[14:]
     assert all(value == {"__type__": "update"} for value in results)
+
+
+def test_failed_delete_keeps_selection_and_shows_retry_banner(favorites, monkeypatch):
+    controller, store, _, newer = favorites
+    app = build_app(controller)
+    delete = callback(app, "delete_event")
+
+    def fail_delete(session_id):
+        raise StorageError("private filesystem details")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(controller.service, "delete_session", fail_delete)
+        failed = delete(newer.session_id, newer.session_id, None, ())
+
+    assert failed[0]["value"] == newer.session_id
+    assert 'role="alert"' in failed[13]
+    assert "Couldn't finish deleting" in failed[13]
+    assert "Some files may already be removed" in failed[13]
+    assert "try deleting it again" in failed[13]
+    assert "private filesystem details" not in failed[13]
+    assert all(value == {"__type__": "update"} for value in failed[14:])
+    assert store.load(newer.session_id)
+
+    retried = delete(newer.session_id, newer.session_id, None, ())
+    assert retried[0]["value"] is None
+    assert retried[13] == ""
+    assert retried[14:][33] is None
+    assert not store.session_dir(newer.session_id).exists()
+
+
+def test_history_selection_clears_previous_notice(favorites):
+    controller, _, _, _ = favorites
+    app = build_app(controller)
+    clear = callback(app, "clear_history_notice")
+    assert clear() == ""
+    config = app.get_config_file()
+    dropdown = next(
+        component
+        for component in config["components"]
+        if component["props"].get("label") == "Saved sessions"
+    )
+    dependency = next(
+        dependency
+        for dependency in config["dependencies"]
+        if (dropdown["id"], "input") in map(tuple, dependency["targets"])
+    )
+    delete_dependency = next(
+        dependency
+        for dependency in config["dependencies"]
+        if dependency.get("api_name") == "delete_event"
+    )
+    assert dependency["outputs"] == [delete_dependency["outputs"][13]]
 
 
 def test_audio_retry_for_a_deleted_session_shows_unavailable(favorites):

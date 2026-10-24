@@ -38,6 +38,10 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
 .piano-roll img { object-fit:contain !important; background:#10141d; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
+.delete-error { display:flex; gap:.8rem; padding:1rem; border:1px solid #d97070; border-left-width:4px; border-radius:10px; background:#351d25; color:#fff0f0; overflow-wrap:anywhere; }
+.delete-error-icon { flex:none; font-size:1.3rem; font-weight:700; }
+.delete-error strong { display:block; margin-bottom:.35rem; font-size:1rem; }
+.delete-error p { margin:0; font-size:.95rem; line-height:1.5; }
 .thinking-toggle { display:flex; flex-direction:column; gap:var(--spacing-lg); }
 .thinking-toggle .info-text { order:-1; margin:0; color:var(--block-title-text-color); font-size:var(--block-title-text-size); font-weight:var(--block-title-text-weight); }
 .thinking-toggle .checkbox-container { border:1px solid var(--input-border-color); border-radius:var(--input-radius); background:var(--input-background-fill); padding:var(--input-padding); box-shadow:var(--input-shadow); cursor:pointer; }
@@ -83,6 +87,7 @@ class LibraryView:
     history_choices: tuple[tuple[str, str], ...] = ()
     favorite_choices: tuple[tuple[str, str], ...] = ()
     notice: str = ""
+    deletion_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -561,6 +566,7 @@ class StudioController:
     def delete_session(self, session_id: str) -> LibraryView:
         from .services import ActiveSessionError
 
+        deletion_failed = False
         try:
             self.service.delete_session(session_id)
         except (ActiveSessionError, SessionBusyError):
@@ -569,9 +575,12 @@ class StudioController:
             notice = "This session was already deleted or is missing."
         except StorageError:
             notice = "Could not delete this session."
+            deletion_failed = True
         else:
             notice = ""
-        return replace(_library_view(self.service), notice=notice)
+        return replace(
+            _library_view(self.service), notice=notice, deletion_failed=deletion_failed
+        )
 
     def credentials_view(self) -> CredentialView:
         from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
@@ -1047,10 +1056,7 @@ def create_app(
                     with gr.Row():
                         open_history = gr.Button("Open session")
                         delete = gr.Button("Delete session permanently", variant="stop")
-                        gr.Markdown(
-                            "Deleting a session removes all four variants and cannot be undone."
-                        )
-                    history_notice = gr.Markdown()
+                    history_notice = gr.HTML()
                 with (
                     gr.Tab("Favorites", id="favorites") as favorites_tab,
                     gr.Row(elem_id="favorites-layout"),
@@ -1658,12 +1664,37 @@ def create_app(
                 results_values = _view_values(
                     _blank_view(not controller.service.generation_active)
                 )
+            notice = view.notice
+            if view.deletion_failed:
+                notice = (
+                    '<div class="delete-error" role="alert">'
+                    '<span class="delete-error-icon" aria-hidden="true">!</span>'
+                    "<div><strong>Couldn't finish deleting this session</strong>"
+                    "<p>Some files may already be removed. Close any app using this "
+                    "session's files, then try deleting it again.</p></div></div>"
+                )
             return (
-                _update(choices=list(view.history_choices), value=None),
+                _update(
+                    choices=list(view.history_choices),
+                    value=selected
+                    if view.notice
+                    and selected in {value for _, value in view.history_choices}
+                    else None,
+                ),
                 *refreshed_favorites(favorite, previous, notice=view.notice),
-                view.notice,
+                notice,
                 *results_values,
             )
+
+        def clear_history_notice() -> str:
+            return ""
+
+        history_choice.input(
+            clear_history_notice,
+            outputs=history_notice,
+            api_visibility="private",
+            queue=False,
+        )
 
         delete.click(
             delete_event,
