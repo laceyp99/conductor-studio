@@ -410,18 +410,13 @@ class StudioController:
         context_window: Any = None,
     ) -> Iterator[AppView]:
         if error := self.validate_prompt(prompt):
-            yield AppView(
-                None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), True, error
-            )  # type: ignore[arg-type]
+            yield _blank_view(True, error)
             return
         try:
             capability = self.catalog.lookup(provider, model)
             if not capability.available:
-                yield AppView(
-                    None,
-                    tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                    True,
-                    capability.error or "The selected model is not ready.",
+                yield _blank_view(
+                    True, capability.error or "The selected model is not ready."
                 )
                 return
             manifest = self.service.create_session(
@@ -440,12 +435,10 @@ class StudioController:
             )
             yield from self._stream_session(manifest.session_id, manifest)
         except Exception:
-            yield AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
+            yield _blank_view(
                 True,
                 "Generation could not start. Check the selected model and settings.",
-            )  # type: ignore[arg-type]
+            )
 
     def retry_audio(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
@@ -457,7 +450,7 @@ class StudioController:
             try:
                 manifest = self.service.store.load(session_id)
             except (StorageError, ContainmentError, OSError):
-                # Another tab may have moved this session to Trash.
+                # Another tab may have deleted this session.
                 yield _blank_view(
                     enabled, "This session is no longer available. Open History."
                 )
@@ -494,12 +487,7 @@ class StudioController:
             except (StorageError, ContainmentError, OSError):
                 manifest = None
         if manifest is None:
-            return AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                not self.service.generation_active,
-                notice,
-            )  # type: ignore[arg-type]
+            return _blank_view(not self.service.generation_active, notice)
         return self._view(
             manifest, enabled=not self.service.generation_active, notice=notice
         )
