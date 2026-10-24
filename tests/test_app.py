@@ -514,6 +514,7 @@ def test_delete_filesystem_failure_shows_notice_and_keeps_session(
     def locked(source):
         raise PermissionError(13, "Access is denied", str(source))
 
+    (store.session_dir(manifest.session_id) / "variants").mkdir()
     monkeypatch.setattr("conductor_studio.storage.shutil.rmtree", locked)
     view = controller.delete_session(manifest.session_id)
 

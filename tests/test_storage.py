@@ -148,14 +148,26 @@ def test_delete_failure_has_safe_message_and_keeps_session(tmp_path, monkeypatch
     manifest = make_manifest()
     complete(manifest)
     store.create(manifest)
+    session = store.session_dir(manifest.session_id)
+    audio = session / "variants" / "01" / "preview.mp3"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"locked audio")
+    original_unlink = os.unlink
 
-    def fail(path):
-        raise PermissionError("sensitive local path")
+    def fail(path, *args, **kwargs):
+        if str(path).endswith("preview.mp3"):
+            raise PermissionError("sensitive local path")
+        return original_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr("conductor_studio.storage.shutil.rmtree", fail)
+    monkeypatch.setattr("os.unlink", fail)
     with pytest.raises(StorageError, match=r"^could not delete session$"):
         store.delete_session(manifest.session_id)
     assert store.load(manifest.session_id).terminal
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    assert audio.is_file()
+    monkeypatch.undo()
+    store.delete_session(manifest.session_id)
+    assert not session.exists()
 
 
 def test_recovery_interrupts_audio_without_invalidating_completed_midi(

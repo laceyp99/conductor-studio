@@ -361,7 +361,18 @@ class SessionStore:
             if any(slot.audio.state is AudioState.RENDERING for slot in manifest.slots):
                 raise SessionBusyError("sessions rendering audio cannot be deleted")
             try:
-                shutil.rmtree(source)
+                # Retain the manifests until all artifacts are gone, so a locked
+                # media file leaves a visible session whose deletion can be retried.
+                for child in source.iterdir():
+                    if child.name in {MANIFEST_NAME, PREVIOUS_MANIFEST_NAME}:
+                        continue
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                (source / PREVIOUS_MANIFEST_NAME).unlink(missing_ok=True)
+                (source / MANIFEST_NAME).unlink(missing_ok=True)
+                source.rmdir()
             except OSError as exc:
                 raise StorageError("could not delete session") from exc
 
