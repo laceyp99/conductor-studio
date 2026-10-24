@@ -24,7 +24,6 @@ from conductor_studio.app import (
 )
 from conductor_studio.catalog import ModelCapability, ModelCatalog
 from conductor_studio.credentials import CredentialStore
-from conductor_studio.media import MediaPublisher
 from conductor_studio.models import (
     AudioInfo,
     AudioState,
@@ -388,7 +387,7 @@ class _RetryService:
         self.active_session_id = None
         self.generation_active = False
         self.retries = []
-        self.trashed = []
+        self.deleted = []
 
     def retry_audio(self, session_id, slot_id):
         self.retries.append((session_id, slot_id))
@@ -399,10 +398,10 @@ class _RetryService:
     def wait(self, session_id):
         return self.manifest
 
-    def move_to_trash(self, session_id):
+    def delete_session(self, session_id):
         if self.move_error:
             raise self.move_error
-        self.trashed.append(session_id)
+        self.deleted.append(session_id)
 
     def history(self):
         return []
@@ -424,7 +423,7 @@ def _retry_manifest():
 def test_audio_retry_callback_streams_its_own_slot_without_generation():
     manifest = _retry_manifest()
     service = _RetryService(manifest)
-    controller = StudioController(service, _Catalog(), object(), object())
+    controller = StudioController(service, _Catalog(), object())
 
     for slot in ("01", "02", "03", "04"):
         callback = _audio_retry_callback(controller, slot)
@@ -453,7 +452,7 @@ def test_audio_retry_callback_streams_its_own_slot_without_generation():
 def test_audio_retry_rejections_explain_the_reason(error, notice):
     manifest = _retry_manifest()
     controller = StudioController(
-        _RetryService(manifest, error=error), _Catalog(), object(), object()
+        _RetryService(manifest, error=error), _Catalog(), object()
     )
     (view,) = controller.retry_audio(manifest.session_id, "01")
     assert notice in view.notice
@@ -466,20 +465,19 @@ def test_audio_retry_rejections_explain_the_reason(error, notice):
         (None, ""),
         (ActiveSessionError("busy"), "still working"),
         (SessionBusyError("rendering"), "still working"),
-        (ContainmentError("C:/private/path"), "already moved or is missing"),
-        (StorageError("C:/private/path"), "Could not move this session to trash."),
+        (ContainmentError("C:/private/path"), "already deleted or is missing"),
+        (StorageError("C:/private/path"), "Could not delete this session."),
     ],
 )
-def test_trash_reports_refusals_in_the_library_notice(error, notice, tmp_path: Path):
+def test_delete_reports_refusals_in_the_library_notice(error, notice, tmp_path: Path):
     manifest = _retry_manifest()
     service = _RetryService(manifest, move_error=error)
-    publisher = MediaPublisher(tmp_path / "served")
-    view = StudioController(service, _Catalog(), object(), publisher).trash(
+    view = StudioController(service, _Catalog(), object()).delete_session(
         manifest.session_id
     )
     assert notice in view.notice if notice else view.notice == ""
     assert "private" not in view.notice
-    assert service.trashed == ([] if error else [manifest.session_id])
+    assert service.deleted == ([] if error else [manifest.session_id])
 
 
 def _terminal_store(tmp_path: Path):
@@ -494,34 +492,32 @@ def _terminal_store(tmp_path: Path):
     manifest.refresh_status()
     store.create(manifest)
     service = StudioService(store=store, credentials=CredentialStore(environment={}))
-    controller = StudioController(
-        service, _Catalog(), object(), MediaPublisher(tmp_path / "served")
-    )
+    controller = StudioController(service, _Catalog(), object())
     return store, manifest, controller
 
 
-def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+def test_deleting_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
     store, manifest, controller = _terminal_store(tmp_path)
 
-    assert controller.trash(manifest.session_id).notice == ""
-    second = controller.trash(manifest.session_id)
-    assert second.notice == "This session was already moved or is missing."
+    assert controller.delete_session(manifest.session_id).notice == ""
+    second = controller.delete_session(manifest.session_id)
+    assert second.notice == "This session was already deleted or is missing."
     assert str(tmp_path) not in second.notice
-    assert store.load(manifest.session_id, in_trash=True).terminal
+    assert not store.session_dir(manifest.session_id).exists()
 
 
-def test_trash_filesystem_failure_shows_notice_and_keeps_session(
+def test_delete_filesystem_failure_shows_notice_and_keeps_session(
     tmp_path: Path, monkeypatch
 ):
     store, manifest, controller = _terminal_store(tmp_path)
 
-    def locked(source, destination):
+    def locked(source):
         raise PermissionError(13, "Access is denied", str(source))
 
-    monkeypatch.setattr("conductor_studio.storage.os.replace", locked)
-    view = controller.trash(manifest.session_id)
+    monkeypatch.setattr("conductor_studio.storage.shutil.rmtree", locked)
+    view = controller.delete_session(manifest.session_id)
 
-    assert view.notice == "Could not move this session to trash."
+    assert view.notice == "Could not delete this session."
     assert store.load(manifest.session_id).session_id == manifest.session_id
 
 
@@ -530,9 +526,7 @@ def test_controller_prompt_validation_and_masked_credential_status():
     assert StudioController.validate_prompt("a motif") is None
     credentials = CredentialStore(environment={"OPENAI_API_KEY": "present"})
     status = (
-        StudioController(object(), _Catalog(), credentials, object())
-        .credentials_view()
-        .status
+        StudioController(object(), _Catalog(), credentials).credentials_view().status
     )
     assert "Environment" in status
     assert "present" not in status
@@ -648,7 +642,7 @@ def test_ollama_refresh_discovers_on_the_generation_host():
     credentials = CredentialStore(
         environment={"OLLAMA_API_HOST_ADDRESS": "http://env-host:11434"}
     )
-    controller = StudioController(object(), catalog, credentials, object())
+    controller = StudioController(object(), catalog, credentials)
 
     controller.refresh_ollama("")
     credentials.set_override("ollama", "http://saved-host:11434")
@@ -665,7 +659,7 @@ def test_ollama_refresh_discovers_on_the_generation_host():
 
 def test_ollama_refresh_selects_ollama_with_complete_temperature_controls():
     controller = StudioController(
-        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={})
     )
     provider, model, _, _, _, effort, mode, advanced, notice, _ = _ollama_values(
         controller, "", "OpenAI", True
@@ -700,7 +694,7 @@ def test_failed_ollama_inspection_hides_controls_and_blocks_generation(tmp_path)
     credentials = CredentialStore(environment={})
     store = SessionStore(tmp_path / "studio")
     service = StudioService(store=store, catalog=catalog, credentials=credentials)
-    controller = StudioController(service, catalog, credentials, object())
+    controller = StudioController(service, catalog, credentials)
 
     controls = controller.control_view("Ollama", "thinker")
     assert not controls.temperature_visible
@@ -742,7 +736,6 @@ def test_temperature_survives_switching_through_failed_ollama_inspection():
         object(),
         Catalog(["working", "failed"]),
         CredentialStore(environment={}),
-        object(),
     )
     working = controller.control_view("Ollama", "working", requested_temperature=0.3)
     failed = controller.control_view(
@@ -762,7 +755,7 @@ def test_ollama_page_load_adds_provider_without_switching_or_touching_controls()
     import gradio as gr
 
     controller = StudioController(
-        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={})
     )
     provider, *controls, _, _ = _ollama_values(controller, "", "OpenAI", False)
 
@@ -772,7 +765,7 @@ def test_ollama_page_load_adds_provider_without_switching_or_touching_controls()
 
 def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
     controller = StudioController(
-        object(), _OllamaCatalog(), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(), CredentialStore(environment={})
     )
     provider, model, *_ = _ollama_values(controller, "", "Ollama", True)
 
@@ -782,7 +775,7 @@ def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
 
 def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
     credentials = CredentialStore(environment={})
-    controller = StudioController(object(), _Catalog(), credentials, object())
+    controller = StudioController(object(), _Catalog(), credentials)
 
     assert "Ollama: Not configured (default http://localhost:11434)" in (
         controller.credentials_view().status
@@ -799,7 +792,7 @@ def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
 
 
 def test_control_transitions_preserve_only_supported_values():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     direct = controller.control_view(
         "Any", "temp-b", previous_mode="temperature", requested_temperature=1.4
     )
@@ -828,7 +821,7 @@ def test_control_transitions_preserve_only_supported_values():
 
 
 def test_added_none_effort_turns_reasoning_off_and_frees_temperature():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     off = controller.control_view(
         "Any", "switchable", previous_mode="effort", requested_temperature=0.4
     )
@@ -863,7 +856,7 @@ def test_added_none_effort_turns_reasoning_off_and_frees_temperature():
 
 
 def test_core_none_effort_is_sent_as_an_effort():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view("Any", "none-first")
     settings = controller._settings(
         "motif", "C", "Major", "Any", "none-first", 0.7, 0.7, False, "none"
@@ -874,7 +867,7 @@ def test_core_none_effort_is_sent_as_an_effort():
 
 
 def test_effort_only_models_always_think_without_temperature():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     settings = controller._settings(
         "motif", "C", "Major", "Any", "effort", 0.7, 0.7, False, "high"
     )
@@ -886,7 +879,7 @@ def test_effort_only_models_always_think_without_temperature():
 
 
 def test_thinking_without_fixed_temperature_keeps_temperature_user_controlled():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view(
         "Any",
         "toggle",
@@ -919,7 +912,7 @@ def test_thinking_without_fixed_temperature_keeps_temperature_user_controlled():
 
 
 def test_fixed_thinking_temperature_disables_slider():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view(
         "Any",
         "budget",
@@ -936,7 +929,7 @@ def test_fixed_thinking_temperature_disables_slider():
 
 
 def test_always_on_reasoning_offers_no_toggle_and_always_thinks():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view("Any", "always", thinking=True)
     settings = controller._settings(
         "motif", "C", "Major", "Any", "always", 0.5, 0.5, False, None
@@ -950,7 +943,7 @@ def test_always_on_reasoning_offers_no_toggle_and_always_thinks():
 
 @pytest.mark.parametrize("invalid", ["8192", "0", "16,384", 16384])
 def test_context_window_accepts_only_presets(invalid):
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     with pytest.raises(ValueError, match="context window preset"):
         controller._settings(
             "motif", "C", "Major", "Ollama", "temp-a", 0.7, 0.7, False, None, invalid
@@ -958,7 +951,7 @@ def test_context_window_accepts_only_presets(invalid):
 
 
 def test_context_window_is_ollama_only_and_default_sends_nothing():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     cloud = controller._settings(
         "motif", "C", "Major", "Any", "temp-a", 0.7, 0.7, False, None, "16384"
     )
@@ -1028,7 +1021,7 @@ def test_stream_renders_each_distinct_manifest_once():
         service.active_session_id = None
 
     service.events = events
-    controller = StudioController(service, _Catalog(), object(), object())
+    controller = StudioController(service, _Catalog(), object())
     rendered = []
     controller._view = lambda m, **_: rendered.append(m.title)
     list(controller.retry_audio(manifest.session_id, "01"))

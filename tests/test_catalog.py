@@ -306,7 +306,7 @@ def test_core_discovery_inspects_only_selection_and_refresh_invalidates_cache(
 
     monkeypatch.setattr(ollama, "initialize_ollama_client", initialize)
     catalog = ModelCatalog(model_info_loader=_info, ollama_timeout=1.25)
-    controller = StudioController(object(), catalog, CredentialStore({}), object())
+    controller = StudioController(object(), catalog, CredentialStore({}))
     controller.refresh_ollama("http://one")
     assert calls == [("http://one", "list")]
     assert len(catalog.models("Ollama")) == 2
@@ -464,7 +464,7 @@ def test_control_selection_and_refresh_use_one_catalog_snapshot(replacement):
         ollama_model_loader=inspect,
     )
     catalog.refresh_ollama("http://old")
-    controller = StudioController(object(), catalog, CredentialStore({}), object())
+    controller = StudioController(object(), catalog, CredentialStore({}))
 
     def refresh():
         refresh_started.set()

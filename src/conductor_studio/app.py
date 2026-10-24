@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
-from .media import MediaPublisher
 from .models import (
     AudioState,
     MidiState,
@@ -256,17 +255,13 @@ def _accounting(manifest: SessionManifest) -> str:
 def _view_for_manifest(
     manifest: SessionManifest,
     *,
-    publisher: MediaPublisher | None = None,
     store: Any | None = None,
     generate_enabled: bool | None = None,
     notice: str = "",
 ) -> AppView:
     cards = []
     for slot in manifest.slots:
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        if publisher and store:
-            with suppress(Exception):
-                published = publisher.publish_slot(store, manifest, slot)
+        published = _slot_paths(store, manifest, slot)
         cards.append(_card_view(manifest, slot, published, store))
     return AppView(
         manifest.session_id,
@@ -276,6 +271,20 @@ def _view_for_manifest(
         _accounting(manifest),
         manifest.batch.failure.message if manifest.batch.failure else "",
     )  # type: ignore[arg-type]
+
+
+def _slot_paths(
+    store: Any, manifest: SessionManifest, slot: VariantSlot
+) -> dict[str, Path | None]:
+    """Resolve available manifest artifacts directly beneath the session root."""
+    paths: dict[str, Path | None] = {"piano_roll": None, "audio": None, "midi": None}
+    if store is not None:
+        for kind in paths:
+            reference = getattr(slot.artifacts, kind)
+            if reference:
+                with suppress(ContainmentError, OSError, AttributeError):
+                    paths[kind] = store.artifact_path(manifest.session_id, reference)
+    return paths
 
 
 def _library_view(service: Any) -> LibraryView:
@@ -303,14 +312,11 @@ def _audio_retry_notice(error: Exception) -> str:
 
 
 class StudioController:
-    def __init__(
-        self, service: Any, catalog: Any, credentials: Any, publisher: MediaPublisher
-    ) -> None:
-        self.service, self.catalog, self.credentials, self.publisher = (
+    def __init__(self, service: Any, catalog: Any, credentials: Any) -> None:
+        self.service, self.catalog, self.credentials = (
             service,
             catalog,
             credentials,
-            publisher,
         )
 
     def _view(
@@ -318,7 +324,6 @@ class StudioController:
     ) -> AppView:
         return _view_for_manifest(
             manifest,
-            publisher=self.publisher,
             store=self.service.store,
             generate_enabled=enabled,
             notice=notice,
@@ -546,9 +551,7 @@ class StudioController:
             (m, slot) for m, slot in favorites if f"{m.session_id}|{slot}" == selection
         )
         slot = manifest.slot(slot_id)
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        with suppress(Exception):
-            published = self.publisher.publish_slot(self.service.store, manifest, slot)
+        published = _slot_paths(self.service.store, manifest, slot)
         card = _card_view(manifest, slot, published, self.service.store)
         return FavoritesView(
             choices,
@@ -567,23 +570,19 @@ class StudioController:
     def history(self) -> LibraryView:
         return _library_view(self.service)
 
-    def trash(self, session_id: str) -> LibraryView:
+    def delete_session(self, session_id: str) -> LibraryView:
         from .services import ActiveSessionError
 
         try:
-            self.service.move_to_trash(session_id)
+            self.service.delete_session(session_id)
         except (ActiveSessionError, SessionBusyError):
             notice = "This session is still working. Try again when it finishes."
         except ContainmentError:
-            notice = "This session was already moved or is missing."
+            notice = "This session was already deleted or is missing."
         except StorageError:
-            notice = "Could not move this session to trash."
+            notice = "Could not delete this session."
         else:
             notice = ""
-            # Served copies would keep the moved session downloadable.  The move
-            # already succeeded, so a leftover copy must not report a failure.
-            with suppress(ContainmentError, OSError):
-                self.publisher.unpublish(session_id)
         return replace(_library_view(self.service), notice=notice)
 
     def credentials_view(self) -> CredentialView:
@@ -939,7 +938,6 @@ def create_app(
         service,
         catalog,
         credentials,
-        MediaPublisher(Path(service.store.studio_root) / "served"),
     )
     providers = tuple(catalog.providers())
     provider_value = (
@@ -1060,7 +1058,10 @@ def create_app(
                     history_choice = gr.Dropdown(label="Saved sessions", choices=())
                     with gr.Row():
                         open_history = gr.Button("Open session")
-                        trash = gr.Button("Move to trash", variant="stop")
+                        delete = gr.Button("Delete session permanently", variant="stop")
+                        gr.Markdown(
+                            "Deleting a session removes all four variants and cannot be undone."
+                        )
                     history_notice = gr.Markdown()
                 with (
                     gr.Tab("Favorites", id="favorites") as favorites_tab,
@@ -1656,14 +1657,14 @@ def create_app(
             concurrency_id="library",
         )
 
-        def trash_event(
+        def delete_event(
             selected: str | None,
             displayed: str | None,
             favorite: str | None,
             previous: tuple[str, ...],
         ) -> tuple[Any, ...]:
-            view = controller.trash(selected)
-            # Clear the results only when the displayed session actually moved.
+            view = controller.delete_session(selected)
+            # Clear results only when the displayed session was deleted.
             results_values: list[Any] = [_skip()] * len(app_outputs)
             if selected and selected == displayed and not view.notice:
                 results_values = _view_values(
@@ -1676,8 +1677,8 @@ def create_app(
                 *results_values,
             )
 
-        trash.click(
-            trash_event,
+        delete.click(
+            delete_event,
             [history_choice, active_session, favorite_selection, favorite_order],
             [history_choice, *favorite_outputs, history_notice, *app_outputs],
             api_visibility="private",

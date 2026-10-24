@@ -24,8 +24,10 @@
 - Never persist credentials, provider request payloads, or arbitrary local
   paths. Credential overrides are process-memory only.
 - Keep session manifests authoritative under the configured Studio root.
-- Serve files only from the dedicated `served/` directory; block `sessions/`
-  and `trash/` from Gradio file serving.
+- Serve artifacts directly from `sessions/` using Gradio static paths, without
+  publication copies. This intentionally exposes session manifests and metadata
+  to clients of the private app. Block legacy `served/`, `trash/`, and Gradio
+  cache paths. Never persist credentials in session records.
 - Keep Gradio sharing disabled and default to loopback.
   For authorized remote previews, bind to the server host's Tailscale IP using
   `--host <tailscale-ip> --allow-network`. Keep the no-authentication warning
@@ -39,8 +41,10 @@
 - Do not automatically retry interrupted or failed provider calls.
 - Treat MIDI success independently from optional audio rendering. Audio retry
   must not issue another LLM request.
-- Move deleted terminal sessions to managed Trash; do not permanently delete
-  creative artifacts in the MVP.
+- Permanently delete terminal sessions on explicit user action. Refuse deletion
+  during generation or audio rendering; do not create Trash or served copies.
+- Give each successful audio render a new filename and remove its previous file
+  so retries load fresh audio when sessions are served directly.
 
 ## Validation
 

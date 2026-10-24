@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -59,7 +60,6 @@ class SessionStore:
             Path(studio_root) if studio_root else resolve_studio_root()
         ).resolve()
         self.sessions_root = self.studio_root / "sessions"
-        self.trash_root = self.studio_root / "trash"
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
@@ -69,7 +69,6 @@ class SessionStore:
 
     def _ensure_roots(self) -> None:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
-        self.trash_root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _reject_reparse(path: Path) -> None:
@@ -116,11 +115,9 @@ class SessionStore:
         ):
             raise ContainmentError("invalid session ID")
 
-    def _session_dir(
-        self, session_id: str, *, in_trash: bool = False, must_exist: bool = False
-    ) -> Path:
+    def _session_dir(self, session_id: str, *, must_exist: bool = False) -> Path:
         self._safe_session_id(session_id)
-        root = self.trash_root if in_trash else self.sessions_root
+        root = self.sessions_root
         candidate = root / session_id
         # The direct-child check is intentional: no nested user path is ever
         # accepted as a session identifier.
@@ -128,16 +125,14 @@ class SessionStore:
             raise ContainmentError("session must be a direct child of its root")
         return self._contained(candidate, root, must_exist=must_exist)
 
-    def session_dir(
-        self, session_id: str, *, in_trash: bool = False, must_exist: bool = False
-    ) -> Path:
+    def session_dir(self, session_id: str, *, must_exist: bool = False) -> Path:
         """Return a safely contained session directory.
 
         This is the supported boundary for code that needs to create derived
         artifacts beneath a session; callers must still validate individual
         files with :meth:`artifact_path` before publishing them.
         """
-        return self._session_dir(session_id, in_trash=in_trash, must_exist=must_exist)
+        return self._session_dir(session_id, must_exist=must_exist)
 
     @staticmethod
     def _read_manifest(path: Path, expected_id: str) -> SessionManifest:
@@ -241,8 +236,8 @@ class SessionStore:
                 pass
             raise
 
-    def load(self, session_id: str, *, in_trash: bool = False) -> SessionManifest:
-        path = self._session_dir(session_id, in_trash=in_trash, must_exist=True)
+    def load(self, session_id: str) -> SessionManifest:
+        path = self._session_dir(session_id, must_exist=True)
         current = path / MANIFEST_NAME
         try:
             return self._read_manifest(current, session_id)
@@ -331,9 +326,7 @@ class SessionStore:
                 recovered.append(self.save(current))
         return recovered
 
-    def artifact_path(
-        self, session_id: str, relative_path: str, *, in_trash: bool = False
-    ) -> Path:
+    def artifact_path(self, session_id: str, relative_path: str) -> Path:
         """Return an existing regular contained artifact for local serving."""
         if not relative_path or "\x00" in relative_path or "\\" in relative_path:
             raise ContainmentError("artifact path must be relative POSIX syntax")
@@ -350,41 +343,27 @@ class SessionStore:
             raise ContainmentError(
                 "only Core generation MIDI artifacts may be referenced"
             )
-        session_dir = self._session_dir(session_id, in_trash=in_trash, must_exist=True)
+        session_dir = self._session_dir(session_id, must_exist=True)
         candidate = session_dir.joinpath(*parsed.parts)
         result = self._contained(candidate, session_dir, must_exist=True)
         if not result.is_file():
             raise ContainmentError("artifact is not a regular file")
         return result
 
-    def move_to_trash(self, session_id: str) -> Path:
-        """Move one complete terminal session beneath the managed trash root."""
+    def delete_session(self, session_id: str) -> None:
+        """Permanently delete one terminal session and its artifacts."""
         lock = self._lock_for(session_id)
         with lock:
             source = self._session_dir(session_id, must_exist=True)
             manifest = self.load(session_id)
             if not manifest.terminal:
-                raise SessionBusyError("active sessions cannot be moved to trash")
+                raise SessionBusyError("active sessions cannot be deleted")
             if any(slot.audio.state is AudioState.RENDERING for slot in manifest.slots):
-                raise SessionBusyError(
-                    "sessions rendering audio cannot be moved to trash"
-                )
-            self._ensure_roots()
-            destination = self.trash_root / session_id
-            self._contained(destination, self.trash_root)
-            if destination.exists():
-                raise StorageError(f"trash destination already exists: {session_id}")
-            # os.replace moves the directory atomically when roots share a
-            # volume (the normal ~/.conductor layout), and never copies only a
-            # subset of the artifacts.  Locked files or permission failures
-            # leave the source untouched and surface as StorageError.
+                raise SessionBusyError("sessions rendering audio cannot be deleted")
             try:
-                os.replace(source, destination)
+                shutil.rmtree(source)
             except OSError as exc:
-                raise StorageError(
-                    f"could not move session to trash: {session_id}"
-                ) from exc
-            return destination
+                raise StorageError("could not delete session") from exc
 
 
 __all__ = [
