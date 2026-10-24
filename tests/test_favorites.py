@@ -576,6 +576,30 @@ def test_deleting_another_session_keeps_the_displayed_results(favorites):
     assert all(value == {"__type__": "update"} for value in results)
 
 
+@pytest.mark.parametrize("display_deleted", [True, False])
+def test_stale_delete_reconciles_only_the_deleted_display(favorites, display_deleted):
+    controller, store, older, newer = favorites
+    delete = callback(build_app(controller), "delete_event")
+    displayed = newer.session_id if display_deleted else older.session_id
+    # Another browser tab removes the session after this tab loaded it.
+    store.delete_session(newer.session_id)
+
+    values = delete(newer.session_id, displayed, None, ())
+
+    assert values[0]["value"] is None
+    assert newer.session_id not in {value for _, value in values[0]["choices"]}
+    assert values[13] == "This session was already deleted or is missing."
+    results = values[14:]
+    if display_deleted:
+        assert results[33] is None
+        assert results[3] is None
+        assert results[4] is None
+        assert results[5]["value"] is None
+        assert results[5]["visible"] is False
+    else:
+        assert all(value == {"__type__": "update"} for value in results)
+
+
 def test_failed_delete_keeps_selection_and_shows_retry_banner(favorites, monkeypatch):
     controller, store, _, newer = favorites
     app = build_app(controller)

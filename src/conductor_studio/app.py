@@ -88,6 +88,7 @@ class LibraryView:
     favorite_choices: tuple[tuple[str, str], ...] = ()
     notice: str = ""
     deletion_failed: bool = False
+    session_gone: bool = False
 
 
 @dataclass(frozen=True)
@@ -567,19 +568,24 @@ class StudioController:
         from .services import ActiveSessionError
 
         deletion_failed = False
+        session_gone = False
         try:
             self.service.delete_session(session_id)
         except (ActiveSessionError, SessionBusyError):
             notice = "This session is still working. Try again when it finishes."
         except ContainmentError:
             notice = "This session was already deleted or is missing."
+            session_gone = True
         except StorageError:
             notice = "Could not delete this session."
             deletion_failed = True
         else:
             notice = ""
         return replace(
-            _library_view(self.service), notice=notice, deletion_failed=deletion_failed
+            _library_view(self.service),
+            notice=notice,
+            deletion_failed=deletion_failed,
+            session_gone=session_gone,
         )
 
     def credentials_view(self) -> CredentialView:
@@ -1658,9 +1664,13 @@ def create_app(
             previous: tuple[str, ...],
         ) -> tuple[Any, ...]:
             view = controller.delete_session(selected)
-            # Clear results only when the displayed session was deleted.
+            # Reconcile the displayed session even if another tab deleted it.
             results_values: list[Any] = [_skip()] * len(app_outputs)
-            if selected and selected == displayed and not view.notice:
+            if (
+                selected
+                and selected == displayed
+                and (not view.notice or view.session_gone)
+            ):
                 results_values = _view_values(
                     _blank_view(not controller.service.generation_active)
                 )
