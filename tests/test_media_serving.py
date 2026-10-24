@@ -29,7 +29,7 @@ def test_delete_revokes_direct_session_urls_and_blocks_legacy_copies(
     monkeypatch.setattr(_StaticFiles, "all_paths", [])
     cache = tmp_path / "gradio-cache"
     cache.mkdir()
-    monkeypatch.setattr(gr.utils, "get_cache_folder", lambda: str(cache))
+    monkeypatch.setenv("GRADIO_TEMP_DIR", str(cache))
     with gr.Blocks(analytics_enabled=False) as blocks:
         component = {
             "midi": gr.DownloadButton,
@@ -81,6 +81,14 @@ def test_delete_revokes_direct_session_urls_and_blocks_legacy_copies(
         assert response.status_code == 200
         assert response.content == source.read_bytes()
         assert client.get(f"/gradio_api/file={legacy}").status_code == 403
+        # Verify the actual Gradio temp directory would be served without the
+        # blocklist, rather than testing a file already denied by default.
+        blocked = blocks.blocked_paths
+        blocks.blocked_paths = [path for path in blocked if path != str(cache)]
+        try:
+            assert client.get(f"/gradio_api/file={legacy}").status_code == 200
+        finally:
+            blocks.blocked_paths = blocked
         # Sessions are intentionally public to clients of this private app,
         # including manifests. Only the session directory is exposed.
         metadata = store.session_dir(manifest.session_id) / "session.json"

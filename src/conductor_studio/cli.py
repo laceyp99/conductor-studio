@@ -69,8 +69,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         blocked_paths=[
             str(studio_root / "served"),
             str(studio_root / "trash"),
-            # Old releases returned cache URLs. Do not keep serving those copies.
-            str(gr.utils.get_cache_folder()),
+            # Only session artifacts are served, including for cached outputs.
+            str(gr.utils.get_upload_folder()),
         ],
         head=f"<style>{_CSS}</style>",
     )

@@ -50,7 +50,7 @@ def test_main_launches_localhost_with_contained_file_policy(
         "blocked_paths": [
             str((tmp_path / "studio" / "served").resolve()),
             str((tmp_path / "studio" / "trash").resolve()),
-            str(gr.utils.get_cache_folder()),
+            str(gr.utils.get_upload_folder()),
         ],
         "head": f"<style>{_CSS}</style>",
     }
