@@ -8,12 +8,14 @@ from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import conductor_core
 from conductor_core import playback
 from conductor_core.config import ProviderCredentials
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
+from .storage import SessionStore
 
 _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
@@ -327,10 +329,16 @@ class CoreAdapter:
         ready, message = self.audio_readiness()
         if not ready:
             return self._unavailable(slot, message)
-        output = self.session_root / "variants" / slot_id / "preview.mp3"
-        output.parent.mkdir(parents=True, exist_ok=True)
         slot.audio.state = AudioState.RENDERING
         try:
+            # Never recreate a session that was removed before rendering began.
+            self.session_root.stat()
+            output = (
+                self.session_root / "variants" / slot_id / f"preview-{uuid4().hex}.mp3"
+            )
+            SessionStore._contained(output, self.session_root)
+            output.parent.parent.mkdir(exist_ok=True)
+            output.parent.mkdir(exist_ok=True)
             soundfont = self.default_soundfont_path
             if soundfont is None and hasattr(self.playback, "get_default_soundfont"):
                 soundfont = self.playback.get_default_soundfont()
@@ -341,6 +349,7 @@ class CoreAdapter:
                     str(midi), output_path=str(output), soundfont_name=soundfont
                 )
             ).resolve()
+            SessionStore._contained(output, self.session_root, must_exist=True)
             if rendered != output.resolve() or not rendered.is_file():
                 raise ValueError("audio renderer returned an unsafe path")
             relative = output.relative_to(self.session_root).as_posix()
@@ -366,10 +375,11 @@ class CoreAdapter:
 
     def _contained_file(self, relative: str) -> Path | None:
         try:
-            candidate = (self.session_root / Path(relative)).resolve()
-            candidate.relative_to(self.session_root)
+            candidate = SessionStore._contained(
+                self.session_root / Path(relative), self.session_root, must_exist=True
+            )
             return candidate if candidate.is_file() else None
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             return None
 
     @staticmethod
