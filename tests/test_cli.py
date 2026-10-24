@@ -48,8 +48,6 @@ def test_main_launches_localhost_with_contained_file_policy(
         "enable_monitoring": False,
         "allowed_paths": [str((tmp_path / "studio" / "sessions").resolve())],
         "blocked_paths": [
-            str((tmp_path / "studio" / "served").resolve()),
-            str((tmp_path / "studio" / "trash").resolve()),
             str(gr.utils.get_upload_folder()),
         ],
         "head": f"<style>{_CSS}</style>",
@@ -57,8 +55,6 @@ def test_main_launches_localhost_with_contained_file_policy(
     sessions = tmp_path / "studio" / "sessions"
     assert sessions.is_dir()
     assert sessions.resolve() in _StaticFiles.all_paths
-    assert not (tmp_path / "studio" / "served").exists()
-    assert not (tmp_path / "studio" / "trash").exists()
 
 
 def test_network_opt_in_emits_unavoidable_warning(

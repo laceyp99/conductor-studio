@@ -57,7 +57,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     # flag before launch and also disable monitoring in the supported launch API.
     app.analytics_enabled = False
     sessions_root = config.ensure_sessions_root()
-    studio_root = sessions_root.parent
     # Serve session artifacts in place so deletion revokes their URLs immediately.
     gr.set_static_paths([sessions_root])
     app.launch(
@@ -67,8 +66,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         enable_monitoring=False,
         allowed_paths=[str(sessions_root)],
         blocked_paths=[
-            str(studio_root / "served"),
-            str(studio_root / "trash"),
             # Only session artifacts are served, including for cached outputs.
             str(gr.utils.get_upload_folder()),
         ],

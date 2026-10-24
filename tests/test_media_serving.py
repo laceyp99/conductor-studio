@@ -22,7 +22,7 @@ from conductor_studio.storage import SessionStore
 
 
 @pytest.mark.parametrize("kind", ["midi", "audio", "image"])
-def test_delete_revokes_direct_session_urls_and_blocks_legacy_copies(
+def test_delete_revokes_direct_session_urls_and_blocks_cached_copies(
     tmp_path, monkeypatch, kind
 ):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
@@ -73,31 +73,26 @@ def test_delete_revokes_direct_session_urls_and_blocks_legacy_copies(
         component.postprocess(str(source)), component, postprocess=True
     )
     assert Path(output["path"]) == source
-    legacy = cache / source.name
-    legacy.write_bytes(source.read_bytes())
+    cached_copy = cache / source.name
+    cached_copy.write_bytes(source.read_bytes())
 
     with TestClient(App.create_app(blocks)) as client:
         response = client.get(output["url"])
         assert response.status_code == 200
         assert response.content == source.read_bytes()
-        assert client.get(f"/gradio_api/file={legacy}").status_code == 403
+        assert client.get(f"/gradio_api/file={cached_copy}").status_code == 403
         # Verify the actual Gradio temp directory would be served without the
         # blocklist, rather than testing a file already denied by default.
         blocked = blocks.blocked_paths
         blocks.blocked_paths = [path for path in blocked if path != str(cache)]
         try:
-            assert client.get(f"/gradio_api/file={legacy}").status_code == 200
+            assert client.get(f"/gradio_api/file={cached_copy}").status_code == 200
         finally:
             blocks.blocked_paths = blocked
         # Sessions are intentionally public to clients of this private app,
         # including manifests. Only the session directory is exposed.
         metadata = store.session_dir(manifest.session_id) / "session.json"
         assert client.get(f"/gradio_api/file={metadata}").status_code == 200
-        for directory in ("served", "trash"):
-            old = store.studio_root / directory / "old.mp3"
-            old.parent.mkdir()
-            old.write_bytes(b"legacy")
-            assert client.get(f"/gradio_api/file={old}").status_code == 403
         outside = store.studio_root / "private.txt"
         outside.write_text("outside sessions")
         assert client.get(f"/gradio_api/file={outside}").status_code == 403

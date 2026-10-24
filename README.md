@@ -166,11 +166,7 @@ charge.
 all four variants, favorites, manifests, backups, and Core records. It cannot
 be undone. Deletion is refused while that session is generating or rendering
 audio. A filesystem error can leave a partial directory; Studio reports the
-failure. There is no Trash or separate media publication directory.
-
-Existing `trash/` and `served/` directories from older releases are left on disk,
-are not served, and are no longer used. Archive or remove them manually after
-reviewing their contents; upgrading does not erase old creative artifacts.
+failure.
 
 ## Security boundary
 
@@ -182,9 +178,8 @@ single-user app. Do not expose unauthenticated network mode to the public intern
 
 Each audio render uses a new filename, and the previous audio file is removed
 after a successful replacement. Deleting a session removes its files, so
-subsequent requests to its URLs are denied. Legacy `served/`, `trash/`, and
-Gradio cache URLs are blocked. Restart Studio after upgrading to apply this
-policy, then reopen sessions to obtain their current media links.
+subsequent requests to its URLs are denied. File serving is limited to
+`sessions/`; Gradio cache URLs are blocked.
 Files already downloaded or loaded into a browser cannot be recalled.
 
 ## Developer checks
