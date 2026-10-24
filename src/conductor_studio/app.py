@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
-from .media import MediaPublisher
 from .models import (
     AudioState,
     MidiState,
@@ -147,6 +146,13 @@ def _empty_card(slot_id: str) -> CardView:
     )
 
 
+def _blank_view(enabled: bool, notice: str = "") -> AppView:
+    """Results with no session, used when the displayed session is gone."""
+    return AppView(
+        None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), enabled, notice
+    )  # type: ignore[arg-type]
+
+
 def _slot_metadata(manifest: SessionManifest) -> str:
     settings = manifest.settings
     controls = []
@@ -249,17 +255,13 @@ def _accounting(manifest: SessionManifest) -> str:
 def _view_for_manifest(
     manifest: SessionManifest,
     *,
-    publisher: MediaPublisher | None = None,
     store: Any | None = None,
     generate_enabled: bool | None = None,
     notice: str = "",
 ) -> AppView:
     cards = []
     for slot in manifest.slots:
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        if publisher and store:
-            with suppress(Exception):
-                published = publisher.publish_slot(store, manifest, slot)
+        published = _slot_paths(store, manifest, slot)
         cards.append(_card_view(manifest, slot, published, store))
     return AppView(
         manifest.session_id,
@@ -269,6 +271,20 @@ def _view_for_manifest(
         _accounting(manifest),
         manifest.batch.failure.message if manifest.batch.failure else "",
     )  # type: ignore[arg-type]
+
+
+def _slot_paths(
+    store: Any, manifest: SessionManifest, slot: VariantSlot
+) -> dict[str, Path | None]:
+    """Resolve available manifest artifacts directly beneath the session root."""
+    paths: dict[str, Path | None] = {"piano_roll": None, "audio": None, "midi": None}
+    if store is not None:
+        for kind in paths:
+            reference = getattr(slot.artifacts, kind)
+            if reference:
+                with suppress(ContainmentError, OSError, AttributeError):
+                    paths[kind] = store.artifact_path(manifest.session_id, reference)
+    return paths
 
 
 def _library_view(service: Any) -> LibraryView:
@@ -296,14 +312,11 @@ def _audio_retry_notice(error: Exception) -> str:
 
 
 class StudioController:
-    def __init__(
-        self, service: Any, catalog: Any, credentials: Any, publisher: MediaPublisher
-    ) -> None:
-        self.service, self.catalog, self.credentials, self.publisher = (
+    def __init__(self, service: Any, catalog: Any, credentials: Any) -> None:
+        self.service, self.catalog, self.credentials = (
             service,
             catalog,
             credentials,
-            publisher,
         )
 
     def _view(
@@ -311,7 +324,6 @@ class StudioController:
     ) -> AppView:
         return _view_for_manifest(
             manifest,
-            publisher=self.publisher,
             store=self.service.store,
             generate_enabled=enabled,
             notice=notice,
@@ -398,18 +410,13 @@ class StudioController:
         context_window: Any = None,
     ) -> Iterator[AppView]:
         if error := self.validate_prompt(prompt):
-            yield AppView(
-                None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), True, error
-            )  # type: ignore[arg-type]
+            yield _blank_view(True, error)
             return
         try:
             capability = self.catalog.lookup(provider, model)
             if not capability.available:
-                yield AppView(
-                    None,
-                    tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                    True,
-                    capability.error or "The selected model is not ready.",
+                yield _blank_view(
+                    True, capability.error or "The selected model is not ready."
                 )
                 return
             manifest = self.service.create_session(
@@ -428,12 +435,10 @@ class StudioController:
             )
             yield from self._stream_session(manifest.session_id, manifest)
         except Exception:
-            yield AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
+            yield _blank_view(
                 True,
                 "Generation could not start. Check the selected model and settings.",
-            )  # type: ignore[arg-type]
+            )
 
     def retry_audio(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
@@ -441,10 +446,17 @@ class StudioController:
                 session_id, self.service.retry_audio(session_id, slot_id)
             )
         except Exception as error:
+            enabled = not self.service.generation_active
+            try:
+                manifest = self.service.store.load(session_id)
+            except (StorageError, ContainmentError, OSError):
+                # Another tab may have deleted this session.
+                yield _blank_view(
+                    enabled, "This session is no longer available. Open History."
+                )
+                return
             yield self._view(
-                self.service.store.load(session_id),
-                enabled=not self.service.generation_active,
-                notice=_audio_retry_notice(error),
+                manifest, enabled=enabled, notice=_audio_retry_notice(error)
             )
 
     def toggle_favorite(self, session_id: str | None, slot_id: str) -> AppView:
@@ -475,12 +487,7 @@ class StudioController:
             except (StorageError, ContainmentError, OSError):
                 manifest = None
         if manifest is None:
-            return AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                not self.service.generation_active,
-                notice,
-            )  # type: ignore[arg-type]
+            return _blank_view(not self.service.generation_active, notice)
         return self._view(
             manifest, enabled=not self.service.generation_active, notice=notice
         )
@@ -532,9 +539,7 @@ class StudioController:
             (m, slot) for m, slot in favorites if f"{m.session_id}|{slot}" == selection
         )
         slot = manifest.slot(slot_id)
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        with suppress(Exception):
-            published = self.publisher.publish_slot(self.service.store, manifest, slot)
+        published = _slot_paths(self.service.store, manifest, slot)
         card = _card_view(manifest, slot, published, self.service.store)
         return FavoritesView(
             choices,
@@ -553,17 +558,17 @@ class StudioController:
     def history(self) -> LibraryView:
         return _library_view(self.service)
 
-    def trash(self, session_id: str) -> LibraryView:
+    def delete_session(self, session_id: str) -> LibraryView:
         from .services import ActiveSessionError
 
         try:
-            self.service.move_to_trash(session_id)
+            self.service.delete_session(session_id)
         except (ActiveSessionError, SessionBusyError):
             notice = "This session is still working. Try again when it finishes."
         except ContainmentError:
-            notice = "This session was already moved or is missing."
+            notice = "This session was already deleted or is missing."
         except StorageError:
-            notice = "Could not move this session to trash."
+            notice = "Could not delete this session."
         else:
             notice = ""
         return replace(_library_view(self.service), notice=notice)
@@ -921,7 +926,6 @@ def create_app(
         service,
         catalog,
         credentials,
-        MediaPublisher(Path(service.store.studio_root) / "served"),
     )
     providers = tuple(catalog.providers())
     provider_value = (
@@ -1042,7 +1046,10 @@ def create_app(
                     history_choice = gr.Dropdown(label="Saved sessions", choices=())
                     with gr.Row():
                         open_history = gr.Button("Open session")
-                        trash = gr.Button("Move to trash", variant="stop")
+                        delete = gr.Button("Delete session permanently", variant="stop")
+                        gr.Markdown(
+                            "Deleting a session removes all four variants and cannot be undone."
+                        )
                     history_notice = gr.Markdown()
                 with (
                     gr.Tab("Favorites", id="favorites") as favorites_tab,
@@ -1637,17 +1644,31 @@ def create_app(
             concurrency_limit=1,
             concurrency_id="library",
         )
-        trash.click(
-            lambda selected, favorite, previous: (
-                _update(
-                    choices=list((view := controller.trash(selected)).history_choices),
-                    value=None,
-                ),
+
+        def delete_event(
+            selected: str | None,
+            displayed: str | None,
+            favorite: str | None,
+            previous: tuple[str, ...],
+        ) -> tuple[Any, ...]:
+            view = controller.delete_session(selected)
+            # Clear results only when the displayed session was deleted.
+            results_values: list[Any] = [_skip()] * len(app_outputs)
+            if selected and selected == displayed and not view.notice:
+                results_values = _view_values(
+                    _blank_view(not controller.service.generation_active)
+                )
+            return (
+                _update(choices=list(view.history_choices), value=None),
                 *refreshed_favorites(favorite, previous, notice=view.notice),
                 view.notice,
-            ),
-            [history_choice, favorite_selection, favorite_order],
-            [history_choice, *favorite_outputs, history_notice],
+                *results_values,
+            )
+
+        delete.click(
+            delete_event,
+            [history_choice, active_session, favorite_selection, favorite_order],
+            [history_choice, *favorite_outputs, history_notice, *app_outputs],
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="library",

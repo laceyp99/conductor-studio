@@ -132,7 +132,7 @@ images and may render up to four MP3 previews. Those jobs are optional: a roll
 or audio failure never invalidates MIDI. Audio-only retry uses the existing
 contained MIDI and never makes an LLM request.
 
-## Data, recovery, and Trash
+## Data, recovery, and deletion
 
 The filesystem under `~/.conductor/studio/` is authoritative:
 
@@ -148,9 +148,7 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png
-        preview.mp3
-  served/                     # copied, approved media only
-  trash/                      # complete recoverable session folders
+        preview-<render-id>.mp3
 ```
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
@@ -164,18 +162,30 @@ but before Studio publishes the batch can therefore leave unreferenced Core
 records under that session; a later new session may incur another provider
 charge.
 
-Deleting a terminal session moves its whole directory to managed Trash in one
-operation. Its manifests, backups, Core records in either layout, and derived
-variants stay together. Restore by moving the complete directory back; do not
-copy individual Core files.
+**Delete session permanently** removes the complete session directory, including
+all four variants, favorites, manifests, backups, and Core records. It cannot
+be undone. Deletion is refused while that session is generating or rendering
+audio. A filesystem error can leave a partial directory; Studio reports the
+failure. There is no Trash or separate media publication directory.
+
+Existing `trash/` and `served/` directories from older releases are left on disk,
+are not served, and are no longer used. Archive or remove them manually after
+reviewing their contents; upgrading does not erase old creative artifacts.
 
 ## Security boundary
 
-Only regular, contained media is copied into `served/`: Core generation MIDI
-(`.mid`/`.midi`) and Studio-derived audio or images (`.mp3`/`.png`). Session
-manifests, Core metadata, variation records, provider messages, loop JSON, and
-anything beneath Trash are never served directly. Do not expose the
-unauthenticated network mode to the public internet.
+Gradio serves `sessions/` directly without cache copies. Anyone who can reach
+Studio can fetch files in that directory, including prompts, model settings,
+session manifests, Core metadata, and loop JSON. Credentials remain in process
+memory and are never saved there. This is an intentional tradeoff for a private,
+single-user app. Do not expose unauthenticated network mode to the public internet.
+
+Each audio render uses a new filename, and the previous audio file is removed
+after a successful replacement. Deleting a session removes its files, so
+subsequent requests to its URLs are denied. Legacy `served/`, `trash/`, and
+Gradio cache URLs are blocked. Restart Studio after upgrading to apply this
+policy, then reopen sessions to obtain their current media links.
+Files already downloaded or loaded into a browser cannot be recalled.
 
 ## Developer checks
 
@@ -202,8 +212,10 @@ Leave `plan.md`, `decisions.md`, and review/scratch notes uncommitted.
   without provider activity.
 - Terminate during generation, restart, and verify interruption without Core
   reconstruction or retry.
-- Reopen History/Favorites, move a terminal session to Trash, and confirm the
-  complete Core and variant trees moved while `served/` contains media only.
+- Reopen History/Favorites, delete a terminal session, and confirm its directory
+  is gone, its displayed cards clear, and copied media URLs are denied.
+- Retry audio and confirm it has a new URL and plays the new render; the old
+  audio URL should no longer work.
 
 Live OpenAI, Anthropic, Gemini, and Ollama checks are opt-in because they require
 credentials and can incur cost. When not explicitly run, their status is
@@ -213,5 +225,5 @@ unverified rather than passed or failed.
 
 Studio intentionally omits variable batch sizes, provider-generation retry,
 automatic recovery, cancellation, in-app MIDI editing, user SoundFont
-management, search/tags/import/export, permanent deletion, accounts,
+management, search/tags/import/export, Trash/restore, accounts,
 authentication, public sessions, billing, and hosted multi-user isolation.

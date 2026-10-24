@@ -264,7 +264,12 @@ def test_audio_only_render_uses_variant_preview(tmp_path):
     adapter = CoreAdapter(
         tmp_path, playback_factory=Playback, default_soundfont_path="x.sf2"
     )
-    assert adapter.render_audio(manifest, "04") == "variants/04/preview.mp3"
+    first = adapter.render_audio(manifest, "04")
+    second = adapter.render_audio(manifest, "04")
+    assert first.startswith("variants/04/preview-")
+    assert first.endswith(".mp3")
+    assert first != second
+    assert slot.artifacts.audio == second
     assert slot.audio.state is AudioState.READY
 
 

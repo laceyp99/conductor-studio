@@ -28,7 +28,7 @@ from .models import (
     utc_now,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore
+from .storage import SessionStore, StorageError
 from .variation import create_manifest
 
 
@@ -253,7 +253,7 @@ class StudioService:
             target["audio"] = AudioInfo(state=AudioState.RENDERING).model_dump(
                 mode="python"
             )
-            target["artifacts"]["audio"] = None
+            previous_audio = target["artifacts"]["audio"]
             local = self.store.save(SessionManifest.model_validate(data))
         self._emit(local)
         local = local.model_copy(deep=True)
@@ -276,6 +276,13 @@ class StudioService:
             target["audio"] = source.audio.model_dump(mode="python")
             target["artifacts"]["audio"] = source.artifacts.audio
             saved = self.store.save(SessionManifest.model_validate(data))
+            if (
+                previous_audio
+                and source.audio.state is AudioState.READY
+                and source.artifacts.audio != previous_audio
+            ):
+                with suppress(OSError, StorageError):
+                    self.store.artifact_path(session_id, previous_audio).unlink()
         self._emit(saved)
 
     def _run(self, session_id, adapter):
@@ -369,18 +376,18 @@ class StudioService:
         return self.store.load(session_id)
 
     def retry_audio(self, session_id, slot_id):
-        manifest = self.store.load(session_id)
-        slot = manifest.slot(slot_id)
-        if slot.midi is not MidiState.READY or not slot.artifacts.midi:
-            raise ValueError("audio retry requires a valid persisted MIDI artifact")
-        if not slot.audio.retryable or slot.audio.state not in {
-            AudioState.FAILED,
-            AudioState.UNAVAILABLE,
-            AudioState.INTERRUPTED,
-        }:
-            raise ValueError("audio is not in a retryable state")
-        self.store.artifact_path(session_id, slot.artifacts.midi)
         with self._state_lock:
+            manifest = self.store.load(session_id)
+            slot = manifest.slot(slot_id)
+            if slot.midi is not MidiState.READY or not slot.artifacts.midi:
+                raise ValueError("audio retry requires a valid persisted MIDI artifact")
+            if not slot.audio.retryable or slot.audio.state not in {
+                AudioState.FAILED,
+                AudioState.UNAVAILABLE,
+                AudioState.INTERRUPTED,
+            }:
+                raise ValueError("audio is not in a retryable state")
+            self.store.artifact_path(session_id, slot.artifacts.midi)
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
             adapter = self.adapter_factory(
@@ -426,12 +433,12 @@ class StudioService:
                 )
             return self.store.set_favorite(session_id, slot_id, favorite)
 
-    def move_to_trash(self, session_id):
-        # Holding the state lock keeps a retry from starting mid-move.
+    def delete_session(self, session_id):
+        # Holding the state lock keeps a retry from starting mid-deletion.
         with self._state_lock:
             if self._active_session_id == session_id:
-                raise ActiveSessionError("an active session cannot be moved to trash")
-            return self.store.move_to_trash(session_id)
+                raise ActiveSessionError("an active session cannot be deleted")
+            return self.store.delete_session(session_id)
 
 
 __all__ = ["ActiveSessionError", "ServiceEvent", "StudioService"]

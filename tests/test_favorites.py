@@ -1,6 +1,7 @@
 """Offline regression coverage for the individual-loop favorites flow."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -12,7 +13,6 @@ from conductor_studio.app import (
     favorite_eligible,
 )
 from conductor_studio.credentials import CredentialStore
-from conductor_studio.media import MediaPublisher
 from conductor_studio.models import (
     AudioInfo,
     AudioState,
@@ -60,7 +60,6 @@ def favorites(tmp_path):
         service,
         object(),
         service.credentials,
-        MediaPublisher(store.studio_root / "served"),
     )
     return controller, store, older, newer
 
@@ -114,10 +113,10 @@ def test_unfavorite_selects_next_then_previous_then_empty(favorites):
     assert "No favorite loops yet." in empty.notice
 
 
-def test_trash_removes_source_favorites_and_clears_stale_selection(favorites):
+def test_delete_removes_source_favorites_and_clears_stale_selection(favorites):
     controller, _, older, newer = favorites
     before = controller.favorites_view(identity(newer, "01"))
-    controller.trash(newer.session_id)
+    controller.delete_session(newer.session_id)
     after = controller.favorites_view(before.selection, before.choices)
     assert after.selection == identity(older, "01")
     assert all(newer.session_id not in value for _, value in after.choices)
@@ -189,9 +188,8 @@ def test_missing_midi_blocks_star_but_allows_unfavorite(favorites):
     ("kind", "label"),
     [("piano_roll", "piano roll"), ("audio", "audio preview"), ("midi", "MIDI")],
 )
-@pytest.mark.parametrize("failure", ["missing", "copy"])
 def test_media_warnings_match_history_and_favorites_without_hiding_usable_files(
-    favorites, monkeypatch, kind, label, failure
+    favorites, kind, label
 ):
     controller, store, _, newer = favorites
     manifest = store.load(newer.session_id)
@@ -205,19 +203,7 @@ def test_media_warnings_match_history_and_favorites_without_hiding_usable_files(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"offline media fixture")
     broken_ref = getattr(slot.artifacts, kind)
-    if failure == "missing":
-        store.artifact_path(newer.session_id, broken_ref).unlink()
-    else:
-        original = controller.publisher.publish_path
-
-        def publish(*args):
-            if args[-1] == broken_ref:
-                raise PermissionError(
-                    "private local path and secret=fixture must not appear"
-                )
-            return original(*args)
-
-        monkeypatch.setattr(controller.publisher, "publish_path", publish)
+    store.artifact_path(newer.session_id, broken_ref).unlink()
 
     history_card = controller.reopen(newer.session_id).cards[0]
     favorite_card = controller.favorites_view(identity(newer, "01")).card
@@ -279,7 +265,7 @@ def callback(app, name):
     )
 
 
-def test_source_callback_loads_history_and_handles_trashed_source(favorites):
+def test_source_callback_loads_history_and_handles_deleted_source(favorites):
     controller, _, _, newer = favorites
     app = build_app(controller)
     view = controller.favorites_view(identity(newer, "03"))
@@ -289,7 +275,7 @@ def test_source_callback_loads_history_and_handles_trashed_source(favorites):
     assert result[38]["value"] == newer.session_id
     assert result[39].selected == "history"
     assert result[40]["visible"] is True
-    controller.trash(newer.session_id)
+    controller.delete_session(newer.session_id)
     stale = callback(app, "open_source_event")(view.selection, order, view.selection)
     assert "unavailable" in stale[-2]
     assert newer.session_id not in stale[42]
@@ -470,14 +456,20 @@ def test_audio_completion_preserves_other_loops_but_reloads_the_retried_loop(
         "other_session": identity(older, "01"),
     }[retry_target]
     if retry_target == "selected":
-        audio.write_bytes(b"ID3 replaced at the same path")
+        replacement = audio.with_name("preview-retry.mp3")
+        replacement.write_bytes(b"ID3 replacement")
+        slot.artifacts.audio = "variants/01/preview-retry.mp3"
+        store.save(manifest)
+        audio.unlink()
     refreshed = callback(app, "refresh_after_audio_retry")(
         selected, order, older.session_id, view.card.audio_path, retried
     )
     assert refreshed[2] == selected
     assert refreshed[9]["interactive"] is True
     if retry_target == "selected":
-        assert refreshed[7] == view.card.audio_path
+        assert refreshed[7] != view.card.audio_path
+        assert Path(refreshed[7]).read_bytes() == b"ID3 replacement"
+        assert not Path(view.card.audio_path).exists()
     else:
         assert refreshed[7] == {"__type__": "update"}
 
@@ -532,7 +524,7 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
         if component["type"] == "button" and component["props"].get("value") in {
             "\u2606 Favorite",
             "\u2605 Unfavorite",
-            "Move to trash",
+            "Delete session permanently",
         }:
             event = next(
                 dep
@@ -542,3 +534,52 @@ def test_ui_event_wiring_refreshes_libraries_after_generation_and_mutations(favo
             assert sidebar["id"] in event["outputs"]
     assert "favorites-sidebar" in ids
     assert "favorites-main" in ids
+
+
+def test_deleting_the_displayed_session_clears_results_and_artifacts(favorites):
+    controller, store, older, newer = favorites
+    manifest = store.load(newer.session_id)
+    artifacts = manifest.slot("01").artifacts
+    artifacts.audio = "variants/01/preview.mp3"
+    artifacts.piano_roll = "variants/01/piano-roll.png"
+    store.save(manifest)
+    for relative in (artifacts.audio, artifacts.piano_roll):
+        path = store.session_dir(newer.session_id) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    app = build_app(controller)
+    card = controller.reopen(newer.session_id).cards[0]
+    session_dir = store.session_dir(newer.session_id)
+    assert card.image_path
+    assert card.audio_path
+    assert card.midi_path
+    other = controller.reopen(older.session_id).cards[0].midi_path
+
+    delete = callback(app, "delete_event")
+    results = delete(newer.session_id, newer.session_id, None, ())[14:]
+
+    assert results[33] is None  # active_session no longer names the deleted session
+    assert results[3] is None  # piano roll
+    assert results[4] is None  # audio player unloads, stopping playback
+    assert results[5]["value"] is None
+    assert results[5]["visible"] is False
+    assert not session_dir.exists()
+    for relative in (artifacts.audio, artifacts.piano_roll, artifacts.midi):
+        assert not (session_dir / relative).exists()
+    assert Path(other).is_file()
+
+
+def test_deleting_another_session_keeps_the_displayed_results(favorites):
+    controller, _, older, newer = favorites
+    delete = callback(build_app(controller), "delete_event")
+    results = delete(older.session_id, newer.session_id, None, ())[14:]
+    assert all(value == {"__type__": "update"} for value in results)
+
+
+def test_audio_retry_for_a_deleted_session_shows_unavailable(favorites):
+    controller, _, _, newer = favorites
+    controller.delete_session(newer.session_id)
+    (view,) = controller.retry_audio(newer.session_id, "01")
+    assert view.session_id is None
+    assert "no longer available" in view.notice
+    assert view.generate_enabled

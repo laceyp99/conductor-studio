@@ -36,6 +36,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(warning, file=sys.stderr)
         logging.getLogger("conductor_studio").warning(warning)
 
+    import gradio as gr
+
     from conductor_studio.app import _CSS, create_app
 
     # Blocks starts its analytics/version-check thread in ``__init__``.  Set
@@ -54,14 +56,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     # launch kwarg.  The current app factory is intentionally lazy, so set the
     # flag before launch and also disable monitoring in the supported launch API.
     app.analytics_enabled = False
-    served_root = config.ensure_served_root()
-    studio_root = served_root.parent
+    sessions_root = config.ensure_sessions_root()
+    studio_root = sessions_root.parent
+    # Serve session artifacts in place so deletion revokes their URLs immediately.
+    gr.set_static_paths([sessions_root])
     app.launch(
         server_name=config.host,
         server_port=config.port,
         share=False,
         enable_monitoring=False,
-        allowed_paths=[str(served_root)],
-        blocked_paths=[str(studio_root / "sessions"), str(studio_root / "trash")],
+        allowed_paths=[str(sessions_root)],
+        blocked_paths=[
+            str(studio_root / "served"),
+            str(studio_root / "trash"),
+            # Only session artifacts are served, including for cached outputs.
+            str(gr.utils.get_upload_folder()),
+        ],
         head=f"<style>{_CSS}</style>",
     )
