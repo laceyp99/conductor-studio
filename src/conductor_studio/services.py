@@ -66,9 +66,10 @@ class StudioService:
         self.max_audio_workers = max_workers
         self._state_lock = threading.RLock()
         self._coordinator_lock = threading.RLock()
+        # Per-run state, keyed by session and removed by the worker when the
+        # run ends, so abandoned UI streams leave nothing behind.
         self._active_session_id = None
         self._executors = {}
-        self._futures = {}
         self._callbacks = {}
         self._events = {}
 
@@ -81,12 +82,11 @@ class StudioService:
     def generation_active(self):
         return self.active_session_id is not None
 
-    def subscribe(self, session_id, callback):
-        with self._state_lock:
-            self._callbacks.setdefault(session_id, []).append(callback)
-
     def events(self, session_id, *, timeout=None):
-        queue = self._events.setdefault(session_id, Queue())
+        """Yield the active run's events until none arrive within `timeout`."""
+        queue = self._events.get(session_id)
+        if queue is None:
+            return
         while True:
             try:
                 yield queue.get(timeout=timeout)
@@ -102,8 +102,9 @@ class StudioService:
                 slot.progress,
                 manifest.model_copy(deep=True),
             )
-            self._events.setdefault(manifest.session_id, Queue()).put(event)
-            for callback in tuple(self._callbacks.get(manifest.session_id, ())):
+            if queue := self._events.get(manifest.session_id):
+                queue.put(event)
+            if callback := self._callbacks.get(manifest.session_id):
                 with suppress(Exception):  # UI observers are isolated
                     callback(event)
 
@@ -328,10 +329,32 @@ class StudioService:
                         message="Generation failed.",
                     ),
                 )
-        finally:
-            with self._state_lock:
-                if self._active_session_id == session_id:
-                    self._active_session_id = None
+
+    def _start(self, session_id, work, *, on_event=None):
+        """Run `work` on a one-shot worker; the caller holds the state lock."""
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="studio-run")
+        self._executors[session_id] = executor
+        self._events[session_id] = Queue()
+        if on_event:
+            self._callbacks[session_id] = on_event
+        self._active_session_id = session_id
+
+        def run():
+            try:
+                work()
+            finally:
+                self._retire(session_id)
+
+        executor.submit(run)
+
+    def _retire(self, session_id):
+        # One locked step, so a new run for this session cannot interleave.
+        with self._state_lock:
+            self._active_session_id = None
+            self._events.pop(session_id, None)
+            self._callbacks.pop(session_id, None)
+            executor = self._executors.pop(session_id)
+        executor.shutdown(wait=False)
 
     def create_session(self, settings: SessionSettings, *, on_event=None):
         capability = (
@@ -348,29 +371,23 @@ class StudioService:
                 settings, core_version=CoreAdapter.core_version()
             )
             created = self.store.create(manifest)
-            if on_event:
-                self.subscribe(created.session_id, on_event)
-            self._events.setdefault(created.session_id, Queue())
             credentials = self.credentials.provider_credentials()
             root = self.store.session_dir(created.session_id, must_exist=True)
             adapter = self.adapter_factory(root, credentials)
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-batch"
+            self._start(
+                created.session_id,
+                lambda: self._run(created.session_id, adapter),
+                on_event=on_event,
             )
-            self._executors[created.session_id] = executor
-            self._active_session_id = created.session_id
-            self._futures[created.session_id] = {
-                "batch": executor.submit(self._run, created.session_id, adapter)
-            }
             return created
 
     start_generation = create_session
     generate = create_session
 
-    def wait(self, session_id, timeout=None):
-        for future in self._futures.get(session_id, {}).values():
-            future.result(timeout=timeout)
-        executor = self._executors.pop(session_id, None)
+    def wait(self, session_id):
+        """Block until the session's run (if any) ends, then load its manifest."""
+        with self._state_lock:
+            executor = self._executors.get(session_id)
         if executor:
             executor.shutdown(wait=True)
         return self.store.load(session_id)
@@ -394,20 +411,7 @@ class StudioService:
                 self.store.session_dir(session_id, must_exist=True),
                 self.credentials.provider_credentials(),
             )
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-audio"
-            )
-            self._executors[session_id] = executor
-            self._active_session_id = session_id
-
-            def run():
-                try:
-                    self._audio(session_id, slot_id, adapter)
-                finally:
-                    with self._state_lock:
-                        self._active_session_id = None
-
-            self._futures[session_id] = {slot_id: executor.submit(run)}
+            self._start(session_id, lambda: self._audio(session_id, slot_id, adapter))
         return manifest
 
     rerender_audio = retry_audio

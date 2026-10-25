@@ -396,11 +396,7 @@ class StudioController:
                 if event.manifest != shown:
                     shown = event.manifest
                     yield self._view(shown, enabled=False)
-        try:
-            final = self.service.wait(session_id)
-        except Exception:
-            final = self.service.store.load(session_id)
-        yield self._view(final, enabled=True)
+        yield self._view(self.service.wait(session_id), enabled=True)
 
     def generate(
         self,
