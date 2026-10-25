@@ -85,7 +85,9 @@ class StudioService:
     def events(self, session_id, *, timeout=None):
         """Yield the active run's events until none arrive within `timeout`."""
         queue = self._events.get(session_id)
-        while queue is not None:
+        if queue is None:
+            return
+        while True:
             try:
                 yield queue.get(timeout=timeout)
             except Empty:  # noqa: PERF203
