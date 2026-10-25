@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import conductor_core
 from conductor_core import playback
 from conductor_core.config import ProviderCredentials
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
+from .storage import SessionStore
 
 _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
@@ -58,6 +60,10 @@ class NormalizedBatchResult:
 class AdapterFailure:
     failure: FailureInfo
     diagnostic: str
+    total_cost: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 BatchOutcome = NormalizedBatchResult | AdapterFailure
@@ -100,6 +106,18 @@ def _safe(value: Any, limit: int = 500) -> str:
     for pattern in _SECRETS:
         text = pattern.sub("[redacted]", text)
     return " ".join(text.split())[:limit]
+
+
+def _accounting(result: Any) -> dict[str, Any]:
+    """Read cost and token usage from a Core batch result, failed or not."""
+    metadata = getattr(result, "metadata", None)
+    usage = getattr(metadata, "usage", None)
+    return {
+        "total_cost": getattr(metadata, "cost", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 def _failure(error: BaseException) -> AdapterFailure:
@@ -273,15 +291,8 @@ class CoreAdapter:
             )
             for item in items
         )
-        usage = metadata.usage
         return NormalizedBatchResult(
-            batch_id,
-            normalized,
-            self.core_version(),
-            metadata.cost,
-            getattr(usage, "input_tokens", None),
-            getattr(usage, "output_tokens", None),
-            getattr(usage, "total_tokens", None),
+            batch_id, normalized, self.core_version(), **_accounting(result)
         )
 
     def generate_batch(
@@ -293,15 +304,16 @@ class CoreAdapter:
             if progress_callback:
                 progress_callback(self.normalize_progress(event))
 
+        result = None
         try:
             engine = self._engine or self.build_engine()
-            return self.normalize_result(
-                engine.generate_variations(
-                    self.build_request(manifest), progress_callback=forward
-                )
+            result = engine.generate_variations(
+                self.build_request(manifest), progress_callback=forward
             )
+            return self.normalize_result(result)
         except Exception as error:
-            outcome = _failure(error)
+            # A rejected result still came from a charged request; keep its usage.
+            outcome = replace(_failure(error), **_accounting(result))
             self.last_diagnostic = outcome.diagnostic
             return outcome
 
@@ -317,10 +329,16 @@ class CoreAdapter:
         ready, message = self.audio_readiness()
         if not ready:
             return self._unavailable(slot, message)
-        output = self.session_root / "variants" / slot_id / "preview.mp3"
-        output.parent.mkdir(parents=True, exist_ok=True)
         slot.audio.state = AudioState.RENDERING
         try:
+            # Never recreate a session that was removed before rendering began.
+            self.session_root.stat()
+            output = (
+                self.session_root / "variants" / slot_id / f"preview-{uuid4().hex}.mp3"
+            )
+            SessionStore._contained(output, self.session_root)
+            output.parent.parent.mkdir(exist_ok=True)
+            output.parent.mkdir(exist_ok=True)
             soundfont = self.default_soundfont_path
             if soundfont is None and hasattr(self.playback, "get_default_soundfont"):
                 soundfont = self.playback.get_default_soundfont()
@@ -331,6 +349,7 @@ class CoreAdapter:
                     str(midi), output_path=str(output), soundfont_name=soundfont
                 )
             ).resolve()
+            SessionStore._contained(output, self.session_root, must_exist=True)
             if rendered != output.resolve() or not rendered.is_file():
                 raise ValueError("audio renderer returned an unsafe path")
             relative = output.relative_to(self.session_root).as_posix()
@@ -356,10 +375,11 @@ class CoreAdapter:
 
     def _contained_file(self, relative: str) -> Path | None:
         try:
-            candidate = (self.session_root / Path(relative)).resolve()
-            candidate.relative_to(self.session_root)
+            candidate = SessionStore._contained(
+                self.session_root / Path(relative), self.session_root, must_exist=True
+            )
             return candidate if candidate.is_file() else None
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             return None
 
     @staticmethod
