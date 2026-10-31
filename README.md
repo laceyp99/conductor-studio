@@ -153,7 +153,8 @@ The filesystem under `~/.conductor/studio/` is authoritative:
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
 serialized, and atomically replaced; the preceding valid manifest is retained
-as `session.previous.json`.
+as `session.previous.json`. Studio has Core write its child and batch records
+without provider messages or absolute paths.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,
