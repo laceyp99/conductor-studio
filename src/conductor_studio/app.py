@@ -1710,38 +1710,42 @@ def create_app(
             concurrency_limit=1,
             concurrency_id="library",
         )
-        secret_outputs = [
-            credential_notice,
+        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
+        credential_outputs = [
+            *ollama_outputs,
             openai_secret,
             anthropic_secret,
             google_secret,
             ollama_host,
         ]
         save_credentials.click(
-            lambda a, b, c, d: (
-                controller.save_credentials(a, b, c, d).status,
+            lambda a, b, c, d, current: (
+                *_credential_values(
+                    controller,
+                    lambda: controller.save_credentials(a, b, c, d),
+                    current,
+                ),
                 _update(""),
                 _update(""),
                 _update(""),
                 _update(d.strip() if d else ""),
             ),
-            [openai_secret, anthropic_secret, google_secret, ollama_host],
-            secret_outputs,
+            [openai_secret, anthropic_secret, google_secret, ollama_host, provider],
+            credential_outputs,
             api_visibility="private",
         )
         clear_credentials.click(
-            lambda: (
-                controller.clear_credentials().status,
+            lambda current: (
+                *_credential_values(controller, controller.clear_credentials, current),
                 _update(""),
                 _update(""),
                 _update(""),
                 _update(""),
             ),
-            None,
-            secret_outputs,
+            provider,
+            credential_outputs,
             api_visibility="private",
         )
-        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
         refresh_ollama.click(
             lambda host, current: _ollama_values(controller, host, current, True),
             [ollama_host, provider],
@@ -1786,6 +1790,23 @@ def _ollama_values(
         notice,
         controller.credentials_view().status,
     )
+
+
+def _credential_values(
+    controller: StudioController,
+    change: Callable[[], CredentialView],
+    current: str | None,
+) -> tuple[Any, ...]:
+    """Apply a Settings credential change, rediscovering Ollama if its host moved.
+
+    Generation reads the host from the credential store, so the model list and
+    capability cache must follow it.  Returns values for the Ollama outputs.
+    """
+    before = controller.credentials.resolve("ollama")
+    status = change().status
+    if controller.credentials.resolve("ollama") == before:
+        return (*(_skip(),) * 9, status)
+    return _ollama_values(controller, "", current, current == "Ollama")
 
 
 def _skip() -> Any:
