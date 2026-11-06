@@ -809,7 +809,7 @@ def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host()
     credentials = CredentialStore(
         environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
     )
-    controller = StudioController(object(), catalog, credentials, object())
+    controller = StudioController(object(), catalog, credentials)
     _ollama_values(controller, "", "Ollama", True)
     assert calls[-1] == ("show", "http://host-a:11434", "alpha")
 
@@ -827,6 +827,12 @@ def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host()
     assert catalog.lookup("Ollama", "beta").available
     assert credentials.provider_credentials().ollama_host == "http://host-b:11434"
 
+    # Reasoning edits reuse the newly discovered host's capabilities.
+    before = list(calls)
+    controller.control_view("Ollama", "beta", thinking=True)
+    controller.control_view("Ollama", "beta", thinking=False)
+    assert calls == before
+
     # An unchanged host or a cloud-only change leaves discovery alone.
     before = list(calls)
     _credential_values(controller, save("http://host-b:11434"), "Ollama")
@@ -843,6 +849,38 @@ def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host()
     assert calls[-1] == ("list", "http://host-a:11434")
     assert catalog.ollama_status().models == ("alpha",)
     assert "host-a" in status
+
+
+@pytest.mark.parametrize("unreachable", [False, True], ids=["empty", "unreachable"])
+def test_host_change_drops_stale_ollama_controls_when_discovery_fails(unreachable):
+    def list_models(*, host_address, **_):
+        if host_address == "http://host-a:11434":
+            return ["alpha"]
+        if unreachable:
+            raise ConnectionError("offline")
+        return []
+
+    catalog = ModelCatalog(
+        ollama_list_loader=list_models,
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials)
+    _ollama_values(controller, "", "Ollama", True)
+
+    provider, model, *_ = _credential_values(
+        controller,
+        lambda: controller.save_credentials("", "", "", "http://host-b:11434"),
+        "Ollama",
+    )
+
+    assert provider["value"] != "Ollama"
+    assert "Ollama" not in provider["choices"]
+    assert model["value"] != "alpha"
+    assert catalog.ollama_status().models == ()
+    assert credentials.resolve("ollama") == "http://host-b:11434"
 
 
 def test_control_transitions_preserve_only_supported_values():
