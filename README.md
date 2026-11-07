@@ -52,6 +52,14 @@ Settings can hold temporary overrides in process memory. Overrides take
 precedence over the environment and disappear at restart; credentials and raw
 provider messages are never persisted.
 
+Settings groups cloud credentials, Ollama discovery, and audio readiness into
+separate cards. API key fields are collapsed under **Change API keys**; their
+status shows the credential source, not verified provider access. **Save host**
+refreshes discovery when the effective Ollama host changes, with feedback beside
+the host field. **Clear session overrides** clears both keys and the host override,
+returning to environment/default values. Audio readiness reports local tool
+availability rather than a verified render.
+
 Provider and model controls come from Core metadata, never from provider or
 model names. Each model gets at most one way to choose reasoning:
 
