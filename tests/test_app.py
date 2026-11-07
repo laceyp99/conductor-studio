@@ -527,9 +527,9 @@ def test_controller_prompt_validation_and_masked_credential_status():
     assert StudioController.validate_prompt("  ")
     assert StudioController.validate_prompt("a motif") is None
     credentials = CredentialStore(environment={"OPENAI_API_KEY": "present"})
-    status = (
-        StudioController(object(), _Catalog(), credentials).credentials_view().status
-    )
+    status = StudioController(
+        object(), _Catalog(), credentials
+    ).cloud_credentials_status()
     assert "Environment" in status
     assert "present" not in status
 
@@ -635,7 +635,10 @@ class _OllamaCatalog(_Catalog):
     def refresh_ollama(self, host):
         self.hosts.append(host)
         return SimpleNamespace(
-            available=bool(self.discovered), models=self.discovered, error=None
+            available=bool(self.discovered),
+            models=self.discovered,
+            error=None,
+            host=host or "http://localhost:11434",
         )
 
 
@@ -777,20 +780,20 @@ def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
 
 def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
     credentials = CredentialStore(environment={})
-    controller = StudioController(object(), _Catalog(), credentials)
-
-    assert "Ollama: Not configured (default http://localhost:11434)" in (
-        controller.credentials_view().status
+    controller = StudioController(
+        object(), ModelCatalog(ollama_list_loader=lambda **_: []), credentials
     )
+    assert credentials.statuses()["ollama"].source == "unset"
     controller.save_credentials("sk-first", "", "", "")
-    status = controller.save_credentials(
-        "", "", "", "http://user:pw@gpu-box:11434/"
-    ).status
+    controller.save_credentials("", "", "", "http://user:pw@gpu-box:11434/")
+    readiness, notice = controller.refresh_ollama("")
+    status = controller.cloud_credentials_status()
 
     assert credentials.resolve("openai") == "sk-first"
-    assert "Ollama: Session override (http://gpu-box:11434)" in status
+    assert readiness.host == "http://gpu-box:11434"
+    assert "Host: http://gpu-box:11434" in notice
     assert "sk-first" not in status
-    assert "pw" not in status
+    assert "pw" not in notice
 
 
 def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host():
@@ -849,7 +852,7 @@ def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host()
     assert calls[-1] == ("list", "http://host-a:11434")
     assert catalog.ollama_status().models == ("alpha",)
     assert status == "Not configured: OpenAI, Anthropic, Gemini"
-    assert "host-a" in controller.credentials_view().status
+    assert credentials.resolve("ollama") == "http://host-a:11434"
 
 
 @pytest.mark.parametrize("unreachable", [False, True], ids=["empty", "unreachable"])

@@ -134,11 +134,6 @@ class ControlView:
     context_visible: bool = False
 
 
-@dataclass(frozen=True)
-class CredentialView:
-    status: str
-
-
 def _empty_card(slot_id: str) -> CardView:
     return CardView(
         slot_id,
@@ -587,24 +582,6 @@ class StudioController:
             session_gone=session_gone,
         )
 
-    def credentials_view(self) -> CredentialView:
-        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
-
-        parts = []
-        for s in self.credentials.statuses().values():
-            label = f"{s.provider.title()}: {s.label()}"
-            if s.provider == "ollama":
-                # Hosts are not secrets; show the effective origin so users can
-                # see what an override replaced.  Userinfo is never displayed.
-                host = self.credentials.resolve("ollama")
-                label += (
-                    f" ({_safe_host_label(host)})"
-                    if host
-                    else f" (default {DEFAULT_OLLAMA_HOST})"
-                )
-            parts.append(label)
-        return CredentialView(", ".join(parts))
-
     @staticmethod
     def audio_status() -> str:
         from .core_adapter import CoreAdapter
@@ -629,7 +606,7 @@ class StudioController:
 
     def save_credentials(
         self, openai: str, anthropic: str, google: str, ollama: str
-    ) -> CredentialView:
+    ) -> None:
         for provider, value in (
             ("openai", openai),
             ("anthropic", anthropic),
@@ -639,17 +616,14 @@ class StudioController:
             # Blank fields keep the current value; use Clear to remove overrides.
             if value and value.strip():
                 self.credentials.set_override(provider, value)
-        return self.credentials_view()
 
-    def clear_credentials(self) -> CredentialView:
+    def clear_credentials(self) -> None:
         for provider in ("openai", "anthropic", "google", "ollama"):
             self.credentials.clear_override(provider)
-        return self.credentials_view()
 
-    def clear_ollama_host(self) -> CredentialView:
+    def clear_ollama_host(self) -> None:
         """Restore the environment/default host without clearing cloud keys."""
         self.credentials.clear_override("ollama")
-        return self.credentials_view()
 
     def control_view(
         self,
@@ -730,12 +704,7 @@ class StudioController:
             if readiness.available
             else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
         )
-        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
-
-        host_label = _safe_host_label(
-            self.credentials.resolve("ollama") or DEFAULT_OLLAMA_HOST
-        )
-        return readiness, f"{notice} · Host: {host_label}"
+        return readiness, f"{notice} · Host: {readiness.host}"
 
 
 def _temperature_locked(capability: Any, thinking: bool, effort: str | None) -> bool:
@@ -1864,7 +1833,7 @@ def _ollama_values(
 
 def _credential_values(
     controller: StudioController,
-    change: Callable[[], CredentialView],
+    change: Callable[[], None],
     current: str | None,
 ) -> tuple[Any, ...]:
     """Apply a Settings credential change, rediscovering Ollama if its host moved.
@@ -1890,7 +1859,6 @@ __all__ = [
     "AppView",
     "CardView",
     "ControlView",
-    "CredentialView",
     "LibraryView",
     "StudioController",
     "create_app",
