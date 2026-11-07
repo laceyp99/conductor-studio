@@ -52,6 +52,9 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 #favorites-sidebar > * { flex-shrink:0; }
 #favorites-sidebar label { white-space:normal !important; overflow-wrap:anywhere; }
 #favorites-sidebar label:has(input:checked) { border:2px solid #91bfff !important; background:#263c59 !important; font-weight:700; }
+.settings-card { border:1px solid var(--border-color-primary); border-radius:14px; padding:1rem !important; background:var(--block-background-fill); }
+.settings-feedback { border-left:3px solid var(--color-accent); padding-left:.8rem; overflow-wrap:anywhere; }
+#settings-cards { align-items:stretch; gap:1rem; }
 @media (max-width:600px) { #favorites-layout { flex-direction:column-reverse !important; } #favorites-sidebar { width:100% !important; max-height:210px; } }
 """
 
@@ -129,11 +132,6 @@ class ControlView:
     effort_visible: bool
     notice: str = ""
     context_visible: bool = False
-
-
-@dataclass(frozen=True)
-class CredentialView:
-    status: str
 
 
 def _empty_card(slot_id: str) -> CardView:
@@ -584,34 +582,31 @@ class StudioController:
             session_gone=session_gone,
         )
 
-    def credentials_view(self) -> CredentialView:
-        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
-
-        parts = []
-        for s in self.credentials.statuses().values():
-            label = f"{s.provider.title()}: {s.label()}"
-            if s.provider == "ollama":
-                # Hosts are not secrets; show the effective origin so users can
-                # see what an override replaced.  Userinfo is never displayed.
-                host = self.credentials.resolve("ollama")
-                label += (
-                    f" ({_safe_host_label(host)})"
-                    if host
-                    else f" (default {DEFAULT_OLLAMA_HOST})"
-                )
-            parts.append(label)
-        return CredentialView(", ".join(parts))
-
     @staticmethod
     def audio_status() -> str:
         from .core_adapter import CoreAdapter
 
         ready, message = CoreAdapter.system_audio_readiness()
-        return "Audio preview: ready." if ready else message
+        return (
+            "**Tools ready** · MIDI works without audio previews."
+            if ready
+            else f"**Unavailable** · {message}\n\nMIDI still works."
+        )
+
+    def cloud_credentials_status(self) -> str:
+        """Show credential sources without implying provider authentication."""
+        names = {"openai": "OpenAI", "anthropic": "Anthropic", "google": "Gemini"}
+        statuses = self.credentials.statuses()
+        sources: dict[str, list[str]] = {}
+        for provider, name in names.items():
+            sources.setdefault(statuses[provider].label(), []).append(name)
+        return " · ".join(
+            f"{source}: {', '.join(providers)}" for source, providers in sources.items()
+        )
 
     def save_credentials(
         self, openai: str, anthropic: str, google: str, ollama: str
-    ) -> CredentialView:
+    ) -> None:
         for provider, value in (
             ("openai", openai),
             ("anthropic", anthropic),
@@ -621,12 +616,14 @@ class StudioController:
             # Blank fields keep the current value; use Clear to remove overrides.
             if value and value.strip():
                 self.credentials.set_override(provider, value)
-        return self.credentials_view()
 
-    def clear_credentials(self) -> CredentialView:
+    def clear_credentials(self) -> None:
         for provider in ("openai", "anthropic", "google", "ollama"):
             self.credentials.clear_override(provider)
-        return self.credentials_view()
+
+    def clear_ollama_host(self) -> None:
+        """Restore the environment/default host without clearing cloud keys."""
+        self.credentials.clear_override("ollama")
 
     def control_view(
         self,
@@ -702,11 +699,12 @@ class StudioController:
         if host and host.strip():
             self.credentials.set_override("ollama", host)
         readiness = self.catalog.refresh_ollama(self.credentials.resolve("ollama"))
-        return readiness, (
+        notice = (
             f"Ollama ready · {len(readiness.models)} model(s) discovered."
             if readiness.available
             else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
         )
+        return readiness, f"{notice} · Host: {readiness.host}"
 
 
 def _temperature_locked(capability: Any, thinking: bool, effort: str | None) -> bool:
@@ -1101,28 +1099,50 @@ def create_app(
                         gr.Markdown("### Favorite loops")
                         favorite_choice = gr.Radio(
                             label="Select a favorite loop",
+                            show_label=False,
                             choices=(),
                         )
                 with gr.Tab("Settings", id="settings") as settings_tab:
-                    gr.Markdown(
-                        "Credentials stay in process memory and are never written to session manifests."
-                    )
-                    openai_secret = gr.Textbox(type="password", label="OpenAI API key")
-                    anthropic_secret = gr.Textbox(
-                        type="password", label="Anthropic API key"
-                    )
-                    google_secret = gr.Textbox(type="password", label="Gemini API key")
-                    ollama_host = gr.Textbox(
-                        label="Ollama host", placeholder="http://localhost:11434"
-                    )
-                    save_credentials = gr.Button("Save in memory", variant="primary")
+                    with gr.Row(elem_id="settings-cards"):
+                        with gr.Column(min_width=280, elem_classes=["settings-card"]):
+                            gr.Markdown("### Cloud providers")
+                            credential_notice = gr.Markdown(
+                                controller.cloud_credentials_status(),
+                                elem_id="cloud-credential-status",
+                            )
+                            with gr.Accordion("Change API keys", open=False):
+                                openai_secret = gr.Textbox(
+                                    type="password", label="OpenAI API key"
+                                )
+                                anthropic_secret = gr.Textbox(
+                                    type="password", label="Anthropic API key"
+                                )
+                                google_secret = gr.Textbox(
+                                    type="password", label="Gemini API key"
+                                )
+                                save_credentials = gr.Button(
+                                    "Save keys in memory", variant="primary"
+                                )
+                        with gr.Column(min_width=280, elem_classes=["settings-card"]):
+                            gr.Markdown("### Ollama")
+                            ollama_notice = gr.Markdown(
+                                "Discovery has not run yet.",
+                                elem_id="ollama-status",
+                                elem_classes=["settings-feedback"],
+                            )
+                            ollama_host = gr.Textbox(
+                                label="Ollama host",
+                                placeholder="http://localhost:11434",
+                            )
+                            with gr.Row():
+                                save_host = gr.Button("Save host", variant="primary")
+                                default_host = gr.Button("Use default")
+                                refresh_ollama = gr.Button("Refresh models")
+                    with gr.Column(elem_classes=["settings-card"]):
+                        gr.Markdown("### Audio previews")
+                        gr.Markdown(controller.audio_status(), elem_id="audio-status")
                     clear_credentials = gr.Button("Clear session overrides")
-                    refresh_ollama = gr.Button("Refresh Ollama models")
-                    credential_notice = gr.Markdown(
-                        controller.credentials_view().status
-                    )
-                    gr.Markdown(controller.audio_status())
-                    ollama_notice = gr.Markdown()
+                    gr.Markdown("Resets keys and host to environment/default values.")
 
             # One shared result surface is shown under Generate and History and
             # hidden elsewhere. Reopen events update this same read-only batch
@@ -1710,38 +1730,61 @@ def create_app(
             concurrency_limit=1,
             concurrency_id="library",
         )
-        secret_outputs = [
-            credential_notice,
+        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
+        credential_outputs = [
+            *ollama_outputs,
             openai_secret,
             anthropic_secret,
             google_secret,
             ollama_host,
         ]
         save_credentials.click(
-            lambda a, b, c, d: (
-                controller.save_credentials(a, b, c, d).status,
+            lambda a, b, c, current: (
+                *_credential_values(
+                    controller,
+                    lambda: controller.save_credentials(a, b, c, ""),
+                    current,
+                ),
                 _update(""),
                 _update(""),
                 _update(""),
-                _update(d.strip() if d else ""),
+                _skip(),
             ),
-            [openai_secret, anthropic_secret, google_secret, ollama_host],
-            secret_outputs,
+            [openai_secret, anthropic_secret, google_secret, provider],
+            credential_outputs,
+            api_visibility="private",
+        )
+        save_host.click(
+            lambda host, current: _credential_values(
+                controller,
+                lambda: controller.save_credentials("", "", "", host),
+                current,
+            ),
+            [ollama_host, provider],
+            ollama_outputs,
+            api_visibility="private",
+        )
+        default_host.click(
+            lambda current: (
+                *_credential_values(controller, controller.clear_ollama_host, current),
+                _update(""),
+            ),
+            provider,
+            [*ollama_outputs, ollama_host],
             api_visibility="private",
         )
         clear_credentials.click(
-            lambda: (
-                controller.clear_credentials().status,
+            lambda current: (
+                *_credential_values(controller, controller.clear_credentials, current),
                 _update(""),
                 _update(""),
                 _update(""),
                 _update(""),
             ),
-            None,
-            secret_outputs,
+            provider,
+            credential_outputs,
             api_visibility="private",
         )
-        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
         refresh_ollama.click(
             lambda host, current: _ollama_values(controller, host, current, True),
             [ollama_host, provider],
@@ -1784,8 +1827,26 @@ def _ollama_values(
         _update(choices=list(providers), value=selected),
         *control_values,
         notice,
-        controller.credentials_view().status,
+        controller.cloud_credentials_status(),
     )
+
+
+def _credential_values(
+    controller: StudioController,
+    change: Callable[[], None],
+    current: str | None,
+) -> tuple[Any, ...]:
+    """Apply a Settings credential change, rediscovering Ollama if its host moved.
+
+    Generation reads the host from the credential store, so the model list and
+    capability cache must follow it.  Returns values for the Ollama outputs.
+    """
+    before = controller.credentials.resolve("ollama")
+    change()
+    status = controller.cloud_credentials_status()
+    if controller.credentials.resolve("ollama") == before:
+        return (*(_skip(),) * 9, status)
+    return _ollama_values(controller, "", current, current == "Ollama")
 
 
 def _skip() -> Any:
@@ -1798,7 +1859,6 @@ __all__ = [
     "AppView",
     "CardView",
     "ControlView",
-    "CredentialView",
     "LibraryView",
     "StudioController",
     "create_app",

@@ -15,6 +15,7 @@ from conductor_studio.app import (
     _audio_retry_callback,
     _card_view,
     _control_values,
+    _credential_values,
     _empty_card,
     _ollama_values,
     _slot_metadata,
@@ -526,9 +527,9 @@ def test_controller_prompt_validation_and_masked_credential_status():
     assert StudioController.validate_prompt("  ")
     assert StudioController.validate_prompt("a motif") is None
     credentials = CredentialStore(environment={"OPENAI_API_KEY": "present"})
-    status = (
-        StudioController(object(), _Catalog(), credentials).credentials_view().status
-    )
+    status = StudioController(
+        object(), _Catalog(), credentials
+    ).cloud_credentials_status()
     assert "Environment" in status
     assert "present" not in status
 
@@ -634,7 +635,10 @@ class _OllamaCatalog(_Catalog):
     def refresh_ollama(self, host):
         self.hosts.append(host)
         return SimpleNamespace(
-            available=bool(self.discovered), models=self.discovered, error=None
+            available=bool(self.discovered),
+            models=self.discovered,
+            error=None,
+            host=host or "http://localhost:11434",
         )
 
 
@@ -776,20 +780,187 @@ def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
 
 def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
     credentials = CredentialStore(environment={})
-    controller = StudioController(object(), _Catalog(), credentials)
-
-    assert "Ollama: Not configured (default http://localhost:11434)" in (
-        controller.credentials_view().status
+    controller = StudioController(
+        object(), ModelCatalog(ollama_list_loader=lambda **_: []), credentials
     )
+    assert credentials.statuses()["ollama"].source == "unset"
     controller.save_credentials("sk-first", "", "", "")
-    status = controller.save_credentials(
-        "", "", "", "http://user:pw@gpu-box:11434/"
-    ).status
+    controller.save_credentials("", "", "", "http://user:pw@gpu-box:11434/")
+    readiness, notice = controller.refresh_ollama("")
+    status = controller.cloud_credentials_status()
 
     assert credentials.resolve("openai") == "sk-first"
-    assert "Ollama: Session override (http://gpu-box:11434)" in status
+    assert readiness.host == "http://gpu-box:11434"
+    assert "Host: http://gpu-box:11434" in notice
     assert "sk-first" not in status
-    assert "pw" not in status
+    assert "pw" not in notice
+
+
+def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host():
+    models = {"http://host-a:11434": ["alpha"], "http://host-b:11434": ["beta"]}
+    calls = []
+
+    def list_models(*, host_address, **_):
+        calls.append(("list", host_address))
+        return models[host_address]
+
+    def inspect(*, model_name, host_address, **_):
+        calls.append(("show", host_address, model_name))
+        return {"model_capabilities": {}}
+
+    catalog = ModelCatalog(ollama_list_loader=list_models, ollama_model_loader=inspect)
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials)
+    _ollama_values(controller, "", "Ollama", True)
+    assert calls[-1] == ("show", "http://host-a:11434", "alpha")
+
+    def save(host):
+        return lambda: controller.save_credentials("", "", "", host)
+
+    provider, model, *_ = _credential_values(
+        controller, save("http://host-b:11434"), "Ollama"
+    )
+    assert model["value"] == "beta"
+    assert calls[-2:] == [
+        ("list", "http://host-b:11434"),
+        ("show", "http://host-b:11434", "beta"),
+    ]
+    assert catalog.lookup("Ollama", "beta").available
+    assert credentials.provider_credentials().ollama_host == "http://host-b:11434"
+
+    # Reasoning edits reuse the newly discovered host's capabilities.
+    before = list(calls)
+    controller.control_view("Ollama", "beta", thinking=True)
+    controller.control_view("Ollama", "beta", thinking=False)
+    assert calls == before
+
+    # An unchanged host or a cloud-only change leaves discovery alone.
+    before = list(calls)
+    _credential_values(controller, save("http://host-b:11434"), "Ollama")
+    _credential_values(
+        controller, lambda: controller.save_credentials("sk", "", "", ""), "Ollama"
+    )
+    assert calls == before
+
+    # Clearing falls back to the environment host; a cloud selection is kept.
+    provider, model, *_, status = _credential_values(
+        controller, controller.clear_credentials, "OpenAI"
+    )
+    assert provider["value"] == "OpenAI"
+    assert calls[-1] == ("list", "http://host-a:11434")
+    assert catalog.ollama_status().models == ("alpha",)
+    assert status == "Not configured: OpenAI, Anthropic, Gemini"
+    assert credentials.resolve("ollama") == "http://host-a:11434"
+
+
+@pytest.mark.parametrize("unreachable", [False, True], ids=["empty", "unreachable"])
+def test_host_change_drops_stale_ollama_controls_when_discovery_fails(unreachable):
+    def list_models(*, host_address, **_):
+        if host_address == "http://host-a:11434":
+            return ["alpha"]
+        if unreachable:
+            raise ConnectionError("offline")
+        return []
+
+    catalog = ModelCatalog(
+        ollama_list_loader=list_models,
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials)
+    _ollama_values(controller, "", "Ollama", True)
+
+    provider, model, *_ = _credential_values(
+        controller,
+        lambda: controller.save_credentials("", "", "", "http://host-b:11434"),
+        "Ollama",
+    )
+
+    assert provider["value"] != "Ollama"
+    assert "Ollama" not in provider["choices"]
+    assert model["value"] != "alpha"
+    assert catalog.ollama_status().models == ()
+    assert credentials.resolve("ollama") == "http://host-b:11434"
+
+
+def test_settings_cards_save_keys_and_host_independently(tmp_path):
+    import asyncio
+
+    from gradio.state_holder import SessionState
+
+    class Service:
+        def history(self):
+            return []
+
+        def favorites(self):
+            return []
+
+    calls = []
+
+    def list_models(*, host_address, **_):
+        calls.append(host_address)
+        return ["local"]
+
+    credentials = CredentialStore(environment={"OPENAI_API_KEY": "environment-key"})
+    catalog = ModelCatalog(
+        ollama_list_loader=list_models,
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    service = Service()
+    service.store = type("Store", (), {"studio_root": tmp_path})()
+    app = create_app(service=service, catalog=catalog, credentials=credentials)
+    config = app.get_config_file()
+    components = {item["id"]: item for item in config["components"]}
+    accordion = next(
+        item
+        for item in components.values()
+        if item["props"].get("label") == "Change API keys"
+    )
+    assert accordion["props"]["open"] is False
+
+    def handler(label):
+        button = next(
+            item
+            for item in components.values()
+            if item["type"] == "button" and item["props"]["value"] == label
+        )
+        return next(
+            item
+            for item in config["dependencies"]
+            if (button["id"], "click") in map(tuple, item["targets"])
+        )
+
+    async def exercise():
+        state = SessionState(app)
+        host = handler("Save host")
+        result = await app.process_api(
+            host["id"], ["http://new-host:11434", "OpenAI"], state=state
+        )
+        assert calls == ["http://new-host:11434"]
+        assert "1 model" in result["data"][-2]
+        assert "new-host" in result["data"][-2]
+        assert credentials.resolve("openai") == "environment-key"
+        keys = handler("Save keys in memory")
+        saved = await app.process_api(
+            keys["id"], ["temporary-key", "", "", "OpenAI"], state=state
+        )
+        assert credentials.resolve("openai") == "temporary-key"
+        assert credentials.resolve("ollama") == "http://new-host:11434"
+        assert calls == ["http://new-host:11434"]
+        assert "Session override" in saved["data"][9]
+        assert "temporary-key" not in str(saved["data"])
+        assert all(value["value"] == "" for value in saved["data"][10:13])
+        reset = handler("Use default")
+        await app.process_api(reset["id"], ["OpenAI"], state=state)
+        assert credentials.resolve("ollama") is None
+        assert credentials.resolve("openai") == "temporary-key"
+        assert calls == ["http://new-host:11434", "http://localhost:11434"]
+
+    asyncio.run(exercise())
 
 
 def test_control_transitions_preserve_only_supported_values():
