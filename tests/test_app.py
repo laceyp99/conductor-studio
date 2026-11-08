@@ -15,6 +15,7 @@ from conductor_studio.app import (
     _audio_retry_callback,
     _card_view,
     _control_values,
+    _credential_values,
     _empty_card,
     _ollama_values,
     _slot_metadata,
@@ -388,7 +389,7 @@ class _RetryService:
         self.active_session_id = None
         self.generation_active = False
         self.retries = []
-        self.trashed = []
+        self.deleted = []
 
     def retry_audio(self, session_id, slot_id):
         self.retries.append((session_id, slot_id))
@@ -399,10 +400,10 @@ class _RetryService:
     def wait(self, session_id):
         return self.manifest
 
-    def move_to_trash(self, session_id):
+    def delete_session(self, session_id):
         if self.move_error:
             raise self.move_error
-        self.trashed.append(session_id)
+        self.deleted.append(session_id)
 
     def history(self):
         return []
@@ -424,7 +425,7 @@ def _retry_manifest():
 def test_audio_retry_callback_streams_its_own_slot_without_generation():
     manifest = _retry_manifest()
     service = _RetryService(manifest)
-    controller = StudioController(service, _Catalog(), object(), object())
+    controller = StudioController(service, _Catalog(), object())
 
     for slot in ("01", "02", "03", "04"):
         callback = _audio_retry_callback(controller, slot)
@@ -453,7 +454,7 @@ def test_audio_retry_callback_streams_its_own_slot_without_generation():
 def test_audio_retry_rejections_explain_the_reason(error, notice):
     manifest = _retry_manifest()
     controller = StudioController(
-        _RetryService(manifest, error=error), _Catalog(), object(), object()
+        _RetryService(manifest, error=error), _Catalog(), object()
     )
     (view,) = controller.retry_audio(manifest.session_id, "01")
     assert notice in view.notice
@@ -466,22 +467,22 @@ def test_audio_retry_rejections_explain_the_reason(error, notice):
         (None, ""),
         (ActiveSessionError("busy"), "still working"),
         (SessionBusyError("rendering"), "still working"),
-        (ContainmentError("C:/private/path"), "already moved or is missing"),
-        (StorageError("C:/private/path"), "Could not move this session to trash."),
+        (ContainmentError("C:/private/path"), "already deleted or is missing"),
+        (StorageError("C:/private/path"), "Could not delete this session."),
     ],
 )
-def test_trash_reports_refusals_in_the_library_notice(error, notice):
+def test_delete_reports_refusals_in_the_library_notice(error, notice, tmp_path: Path):
     manifest = _retry_manifest()
     service = _RetryService(manifest, move_error=error)
-    view = StudioController(service, _Catalog(), object(), object()).trash(
+    view = StudioController(service, _Catalog(), object()).delete_session(
         manifest.session_id
     )
     assert notice in view.notice if notice else view.notice == ""
     assert "private" not in view.notice
-    assert service.trashed == ([] if error else [manifest.session_id])
+    assert service.deleted == ([] if error else [manifest.session_id])
 
 
-def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+def _terminal_store(tmp_path: Path):
     store = SessionStore(tmp_path / "studio")
     manifest = _retry_manifest()
     manifest.batch.batch_id = "batch-1"
@@ -493,24 +494,43 @@ def test_trashing_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
     manifest.refresh_status()
     store.create(manifest)
     service = StudioService(store=store, credentials=CredentialStore(environment={}))
-    controller = StudioController(service, _Catalog(), object(), object())
+    controller = StudioController(service, _Catalog(), object())
+    return store, manifest, controller
 
-    assert controller.trash(manifest.session_id).notice == ""
-    second = controller.trash(manifest.session_id)
-    assert second.notice == "This session was already moved or is missing."
+
+def test_deleting_the_same_session_twice_reports_it_as_missing(tmp_path: Path):
+    store, manifest, controller = _terminal_store(tmp_path)
+
+    assert controller.delete_session(manifest.session_id).notice == ""
+    second = controller.delete_session(manifest.session_id)
+    assert second.notice == "This session was already deleted or is missing."
     assert str(tmp_path) not in second.notice
-    assert store.load(manifest.session_id, in_trash=True).terminal
+    assert not store.session_dir(manifest.session_id).exists()
+
+
+def test_delete_filesystem_failure_shows_notice_and_keeps_session(
+    tmp_path: Path, monkeypatch
+):
+    store, manifest, controller = _terminal_store(tmp_path)
+
+    def locked(source):
+        raise PermissionError(13, "Access is denied", str(source))
+
+    (store.session_dir(manifest.session_id) / "variants").mkdir()
+    monkeypatch.setattr("conductor_studio.storage.shutil.rmtree", locked)
+    view = controller.delete_session(manifest.session_id)
+
+    assert view.notice == "Could not delete this session."
+    assert store.load(manifest.session_id).session_id == manifest.session_id
 
 
 def test_controller_prompt_validation_and_masked_credential_status():
     assert StudioController.validate_prompt("  ")
     assert StudioController.validate_prompt("a motif") is None
     credentials = CredentialStore(environment={"OPENAI_API_KEY": "present"})
-    status = (
-        StudioController(object(), _Catalog(), credentials, object())
-        .credentials_view()
-        .status
-    )
+    status = StudioController(
+        object(), _Catalog(), credentials
+    ).cloud_credentials_status()
     assert "Environment" in status
     assert "present" not in status
 
@@ -620,7 +640,10 @@ class _OllamaCatalog(_Catalog):
     def refresh_ollama(self, host):
         self.hosts.append(host)
         return SimpleNamespace(
-            available=bool(self.discovered), models=self.discovered, error=None
+            available=bool(self.discovered),
+            models=self.discovered,
+            error=None,
+            host=host or "http://localhost:11434",
         )
 
 
@@ -629,7 +652,7 @@ def test_ollama_refresh_discovers_on_the_generation_host():
     credentials = CredentialStore(
         environment={"OLLAMA_API_HOST_ADDRESS": "http://env-host:11434"}
     )
-    controller = StudioController(object(), catalog, credentials, object())
+    controller = StudioController(object(), catalog, credentials)
 
     controller.refresh_ollama("")
     credentials.set_override("ollama", "http://saved-host:11434")
@@ -646,7 +669,7 @@ def test_ollama_refresh_discovers_on_the_generation_host():
 
 def test_ollama_refresh_selects_ollama_with_complete_temperature_controls():
     controller = StudioController(
-        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={})
     )
     provider, model, _, _, _, effort, mode, advanced, notice, _ = _ollama_values(
         controller, "", "OpenAI", True
@@ -681,7 +704,7 @@ def test_failed_ollama_inspection_hides_controls_and_blocks_generation(tmp_path)
     credentials = CredentialStore(environment={})
     store = SessionStore(tmp_path / "studio")
     service = StudioService(store=store, catalog=catalog, credentials=credentials)
-    controller = StudioController(service, catalog, credentials, object())
+    controller = StudioController(service, catalog, credentials)
 
     controls = controller.control_view("Ollama", "thinker")
     assert not controls.temperature_visible
@@ -723,7 +746,6 @@ def test_temperature_survives_switching_through_failed_ollama_inspection():
         object(),
         Catalog(["working", "failed"]),
         CredentialStore(environment={}),
-        object(),
     )
     working = controller.control_view("Ollama", "working", requested_temperature=0.3)
     failed = controller.control_view(
@@ -743,7 +765,7 @@ def test_ollama_page_load_adds_provider_without_switching_or_touching_controls()
     import gradio as gr
 
     controller = StudioController(
-        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(["llama3"]), CredentialStore(environment={})
     )
     provider, *controls, _, _ = _ollama_values(controller, "", "OpenAI", False)
 
@@ -753,7 +775,7 @@ def test_ollama_page_load_adds_provider_without_switching_or_touching_controls()
 
 def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
     controller = StudioController(
-        object(), _OllamaCatalog(), CredentialStore(environment={}), object()
+        object(), _OllamaCatalog(), CredentialStore(environment={})
     )
     provider, model, *_ = _ollama_values(controller, "", "Ollama", True)
 
@@ -763,24 +785,191 @@ def test_unavailable_ollama_falls_back_from_a_stale_ollama_selection():
 
 def test_saving_blank_fields_keeps_overrides_and_shows_the_ollama_host():
     credentials = CredentialStore(environment={})
-    controller = StudioController(object(), _Catalog(), credentials, object())
-
-    assert "Ollama: Not configured (default http://localhost:11434)" in (
-        controller.credentials_view().status
+    controller = StudioController(
+        object(), ModelCatalog(ollama_list_loader=lambda **_: []), credentials
     )
+    assert credentials.statuses()["ollama"].source == "unset"
     controller.save_credentials("sk-first", "", "", "")
-    status = controller.save_credentials(
-        "", "", "", "http://user:pw@gpu-box:11434/"
-    ).status
+    controller.save_credentials("", "", "", "http://user:pw@gpu-box:11434/")
+    readiness, notice = controller.refresh_ollama("")
+    status = controller.cloud_credentials_status()
 
     assert credentials.resolve("openai") == "sk-first"
-    assert "Ollama: Session override (http://gpu-box:11434)" in status
+    assert readiness.host == "http://gpu-box:11434"
+    assert "Host: http://gpu-box:11434" in notice
     assert "sk-first" not in status
-    assert "pw" not in status
+    assert "pw" not in notice
+
+
+def test_saving_or_clearing_the_ollama_host_rediscovers_on_the_generation_host():
+    models = {"http://host-a:11434": ["alpha"], "http://host-b:11434": ["beta"]}
+    calls = []
+
+    def list_models(*, host_address, **_):
+        calls.append(("list", host_address))
+        return models[host_address]
+
+    def inspect(*, model_name, host_address, **_):
+        calls.append(("show", host_address, model_name))
+        return {"model_capabilities": {}}
+
+    catalog = ModelCatalog(ollama_list_loader=list_models, ollama_model_loader=inspect)
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials)
+    _ollama_values(controller, "", "Ollama", True)
+    assert calls[-1] == ("show", "http://host-a:11434", "alpha")
+
+    def save(host):
+        return lambda: controller.save_credentials("", "", "", host)
+
+    provider, model, *_ = _credential_values(
+        controller, save("http://host-b:11434"), "Ollama"
+    )
+    assert model["value"] == "beta"
+    assert calls[-2:] == [
+        ("list", "http://host-b:11434"),
+        ("show", "http://host-b:11434", "beta"),
+    ]
+    assert catalog.lookup("Ollama", "beta").available
+    assert credentials.provider_credentials().ollama_host == "http://host-b:11434"
+
+    # Reasoning edits reuse the newly discovered host's capabilities.
+    before = list(calls)
+    controller.control_view("Ollama", "beta", thinking=True)
+    controller.control_view("Ollama", "beta", thinking=False)
+    assert calls == before
+
+    # An unchanged host or a cloud-only change leaves discovery alone.
+    before = list(calls)
+    _credential_values(controller, save("http://host-b:11434"), "Ollama")
+    _credential_values(
+        controller, lambda: controller.save_credentials("sk", "", "", ""), "Ollama"
+    )
+    assert calls == before
+
+    # Clearing falls back to the environment host; a cloud selection is kept.
+    provider, model, *_, status = _credential_values(
+        controller, controller.clear_credentials, "OpenAI"
+    )
+    assert provider["value"] == "OpenAI"
+    assert calls[-1] == ("list", "http://host-a:11434")
+    assert catalog.ollama_status().models == ("alpha",)
+    assert status == "Not configured: OpenAI, Anthropic, Gemini"
+    assert credentials.resolve("ollama") == "http://host-a:11434"
+
+
+@pytest.mark.parametrize("unreachable", [False, True], ids=["empty", "unreachable"])
+def test_host_change_drops_stale_ollama_controls_when_discovery_fails(unreachable):
+    def list_models(*, host_address, **_):
+        if host_address == "http://host-a:11434":
+            return ["alpha"]
+        if unreachable:
+            raise ConnectionError("offline")
+        return []
+
+    catalog = ModelCatalog(
+        ollama_list_loader=list_models,
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    credentials = CredentialStore(
+        environment={"OLLAMA_API_HOST_ADDRESS": "http://host-a:11434"}
+    )
+    controller = StudioController(object(), catalog, credentials)
+    _ollama_values(controller, "", "Ollama", True)
+
+    provider, model, *_ = _credential_values(
+        controller,
+        lambda: controller.save_credentials("", "", "", "http://host-b:11434"),
+        "Ollama",
+    )
+
+    assert provider["value"] != "Ollama"
+    assert "Ollama" not in provider["choices"]
+    assert model["value"] != "alpha"
+    assert catalog.ollama_status().models == ()
+    assert credentials.resolve("ollama") == "http://host-b:11434"
+
+
+def test_settings_cards_save_keys_and_host_independently(tmp_path):
+    import asyncio
+
+    from gradio.state_holder import SessionState
+
+    class Service:
+        def history(self):
+            return []
+
+        def favorites(self):
+            return []
+
+    calls = []
+
+    def list_models(*, host_address, **_):
+        calls.append(host_address)
+        return ["local"]
+
+    credentials = CredentialStore(environment={"OPENAI_API_KEY": "environment-key"})
+    catalog = ModelCatalog(
+        ollama_list_loader=list_models,
+        ollama_model_loader=lambda **_: {"model_capabilities": {}},
+    )
+    service = Service()
+    service.store = type("Store", (), {"studio_root": tmp_path})()
+    app = create_app(service=service, catalog=catalog, credentials=credentials)
+    config = app.get_config_file()
+    components = {item["id"]: item for item in config["components"]}
+    accordion = next(
+        item
+        for item in components.values()
+        if item["props"].get("label") == "Change API keys"
+    )
+    assert accordion["props"]["open"] is False
+
+    def handler(label):
+        button = next(
+            item
+            for item in components.values()
+            if item["type"] == "button" and item["props"]["value"] == label
+        )
+        return next(
+            item
+            for item in config["dependencies"]
+            if (button["id"], "click") in map(tuple, item["targets"])
+        )
+
+    async def exercise():
+        state = SessionState(app)
+        host = handler("Save host")
+        result = await app.process_api(
+            host["id"], ["http://new-host:11434", "OpenAI"], state=state
+        )
+        assert calls == ["http://new-host:11434"]
+        assert "1 model" in result["data"][-2]
+        assert "new-host" in result["data"][-2]
+        assert credentials.resolve("openai") == "environment-key"
+        keys = handler("Save keys in memory")
+        saved = await app.process_api(
+            keys["id"], ["temporary-key", "", "", "OpenAI"], state=state
+        )
+        assert credentials.resolve("openai") == "temporary-key"
+        assert credentials.resolve("ollama") == "http://new-host:11434"
+        assert calls == ["http://new-host:11434"]
+        assert "Session override" in saved["data"][9]
+        assert "temporary-key" not in str(saved["data"])
+        assert all(value["value"] == "" for value in saved["data"][10:13])
+        reset = handler("Use default")
+        await app.process_api(reset["id"], ["OpenAI"], state=state)
+        assert credentials.resolve("ollama") is None
+        assert credentials.resolve("openai") == "temporary-key"
+        assert calls == ["http://new-host:11434", "http://localhost:11434"]
+
+    asyncio.run(exercise())
 
 
 def test_control_transitions_preserve_only_supported_values():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     direct = controller.control_view(
         "Any", "temp-b", previous_mode="temperature", requested_temperature=1.4
     )
@@ -809,7 +998,7 @@ def test_control_transitions_preserve_only_supported_values():
 
 
 def test_added_none_effort_turns_reasoning_off_and_frees_temperature():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     off = controller.control_view(
         "Any", "switchable", previous_mode="effort", requested_temperature=0.4
     )
@@ -844,7 +1033,7 @@ def test_added_none_effort_turns_reasoning_off_and_frees_temperature():
 
 
 def test_core_none_effort_is_sent_as_an_effort():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view("Any", "none-first")
     settings = controller._settings(
         "motif", "C", "Major", "Any", "none-first", 0.7, 0.7, False, "none"
@@ -855,7 +1044,7 @@ def test_core_none_effort_is_sent_as_an_effort():
 
 
 def test_effort_only_models_always_think_without_temperature():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     settings = controller._settings(
         "motif", "C", "Major", "Any", "effort", 0.7, 0.7, False, "high"
     )
@@ -867,7 +1056,7 @@ def test_effort_only_models_always_think_without_temperature():
 
 
 def test_thinking_without_fixed_temperature_keeps_temperature_user_controlled():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view(
         "Any",
         "toggle",
@@ -900,7 +1089,7 @@ def test_thinking_without_fixed_temperature_keeps_temperature_user_controlled():
 
 
 def test_fixed_thinking_temperature_disables_slider():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view(
         "Any",
         "budget",
@@ -917,7 +1106,7 @@ def test_fixed_thinking_temperature_disables_slider():
 
 
 def test_always_on_reasoning_offers_no_toggle_and_always_thinks():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     view = controller.control_view("Any", "always", thinking=True)
     settings = controller._settings(
         "motif", "C", "Major", "Any", "always", 0.5, 0.5, False, None
@@ -931,7 +1120,7 @@ def test_always_on_reasoning_offers_no_toggle_and_always_thinks():
 
 @pytest.mark.parametrize("invalid", ["8192", "0", "16,384", 16384])
 def test_context_window_accepts_only_presets(invalid):
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     with pytest.raises(ValueError, match="context window preset"):
         controller._settings(
             "motif", "C", "Major", "Ollama", "temp-a", 0.7, 0.7, False, None, invalid
@@ -939,7 +1128,7 @@ def test_context_window_accepts_only_presets(invalid):
 
 
 def test_context_window_is_ollama_only_and_default_sends_nothing():
-    controller = StudioController(object(), _ControlCatalog(), object(), object())
+    controller = StudioController(object(), _ControlCatalog(), object())
     cloud = controller._settings(
         "motif", "C", "Major", "Any", "temp-a", 0.7, 0.7, False, None, "16384"
     )
@@ -992,3 +1181,25 @@ def test_accounting_is_session_level_and_omits_unavailable_fields():
     view = _view_for_manifest(manifest)
     assert view.accounting == "Cost $0.012000 · Input 10 tokens"
     assert view.batch_error == ""
+
+
+def test_stream_renders_each_distinct_manifest_once():
+    manifest = _retry_manifest()
+    changed = manifest.model_copy(deep=True)
+    changed.title = "Changed"
+    service = _RetryService(manifest)
+    service.active_session_id = manifest.session_id
+
+    def events(session_id, *, timeout=None):
+        # Mirrors StudioService._emit: one event per slot for every save.
+        for saved in (manifest, changed):
+            for _slot in range(4):
+                yield SimpleNamespace(manifest=saved.model_copy(deep=True))
+        service.active_session_id = None
+
+    service.events = events
+    controller = StudioController(service, _Catalog(), object())
+    rendered = []
+    controller._view = lambda m, **_: rendered.append(m.title)
+    list(controller.retry_audio(manifest.session_id, "01"))
+    assert rendered == [manifest.title, "Changed", manifest.title]

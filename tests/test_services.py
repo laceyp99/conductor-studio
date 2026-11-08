@@ -19,7 +19,7 @@ from conductor_studio.models import (
     SlotState,
 )
 from conductor_studio.services import ActiveSessionError, StudioService
-from conductor_studio.storage import SessionStore
+from conductor_studio.storage import ContainmentError, SessionStore
 
 
 def settings():
@@ -126,23 +126,35 @@ def test_one_call_queued_first_and_atomic_publication(tmp_path):
 
 def test_progress_and_publication_never_show_partial_slot_states(tmp_path):
     service, _ = make_service(tmp_path)
-    seen = []
-    created = service.create_session(
-        settings(),
-        on_event=lambda e: seen.append(tuple(s.state for s in e.manifest.slots)),
-    )
+    events = []
+    created = service.create_session(settings(), on_event=events.append)
     service.wait(created.session_id)
-    assert seen
-    assert all(len(set(states)) == 1 for states in seen)
-    processing = [
-        event
-        for event in service.events(created.session_id, timeout=0.001)
-        if event.state is SlotState.PROCESSING_MIDI
-    ]
+    assert events
+    assert all(len({s.state for s in e.manifest.slots}) == 1 for e in events)
+    processing = [e for e in events if e.state is SlotState.PROCESSING_MIDI]
     assert processing
     assert all(
         event.progress.message == "Processing MIDI 2 of 4" for event in processing
     )
+
+
+def test_unconsumed_runs_release_their_worker_and_events(tmp_path):
+    # A UI stream may be abandoned without ever calling wait(); each run must
+    # still retire its worker thread and queued manifest snapshots.
+    service, _ = make_service(tmp_path)
+    for _ in range(2):
+        created = service.create_session(settings(), on_event=lambda e: None)
+        for _ in range(3000):
+            if not service.generation_active:
+                break
+            threading.Event().wait(0.001)
+        assert not service.generation_active
+    assert (service._executors, service._events, service._callbacks) == ({}, {}, {})
+    workers = [t for t in threading.enumerate() if t.name.startswith("studio-run")]
+    for worker in workers:
+        worker.join(3)
+    assert not any(worker.is_alive() for worker in workers)
+    assert list(service.events(created.session_id, timeout=0.001)) == []
 
 
 def test_batch_failure_is_atomic(tmp_path):
@@ -158,6 +170,32 @@ def test_batch_failure_is_atomic(tmp_path):
     assert adapters[0].batch_calls == 1
     assert not result.batch.generation_ids
     assert all(s.state is SlotState.FAILED for s in result.slots)
+    assert result.batch.total_cost is None
+
+
+def test_batch_failure_persists_reported_accounting(tmp_path):
+    failure = AdapterFailure(
+        FailureInfo(
+            category=ErrorCategory.VALIDATION,
+            message="The generation batch was invalid.",
+        ),
+        "detail",
+        total_cost=0.12,
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+    )
+    service, adapters = make_service(tmp_path, outcome=failure)
+    result = service.wait(service.create_session(settings()).session_id)
+    assert adapters[0].batch_calls == 1
+    assert (result.batch.batch_id, result.batch.generation_ids) == (None, [])
+    assert all(s.midi is not MidiState.READY for s in result.slots)
+    assert (
+        result.batch.total_cost,
+        result.batch.input_tokens,
+        result.batch.output_tokens,
+        result.batch.total_tokens,
+    ) == (0.12, 10, 20, 30)
 
 
 def test_active_lock_includes_all_concurrent_audio(tmp_path):
@@ -256,7 +294,7 @@ def test_audio_rendering_is_persisted_and_interruption_can_be_retried(tmp_path):
     assert [adapter.audio_calls for adapter in adapters] == [["02"], ["02"]]
 
 
-def test_session_cannot_be_trashed_while_audio_retry_renders(tmp_path):
+def test_session_cannot_be_deleted_while_audio_retry_renders(tmp_path):
     gate = threading.Event()
     service, _ = make_service(tmp_path)
     created = service.create_session(settings())
@@ -273,14 +311,51 @@ def test_session_cannot_be_trashed_while_audio_retry_renders(tmp_path):
     try:
         service.retry_audio(created.session_id, "03")
         with pytest.raises(ActiveSessionError):
-            service.move_to_trash(created.session_id)
+            service.delete_session(created.session_id)
     finally:
         gate.set()
         service.wait(created.session_id)
     assert service.store.load(created.session_id).slot("03").audio.state is (
         AudioState.READY
     )
-    assert service.move_to_trash(created.session_id).is_dir()
+    service.delete_session(created.session_id)
+    assert not service.store.session_dir(created.session_id).exists()
+    with pytest.raises(ContainmentError, match="outside managed root"):
+        service.retry_audio(created.session_id, "03")
+    assert not service.store.session_dir(created.session_id).exists()
+
+
+def test_audio_retry_removes_previous_file_after_persisting_version(tmp_path):
+    service, _ = make_service(tmp_path)
+    created = service.create_session(settings())
+    manifest = service.wait(created.session_id)
+    slot = manifest.slot("01")
+    previous = service.store.artifact_path(created.session_id, slot.artifacts.audio)
+    slot.audio = AudioInfo(
+        state=AudioState.INTERRUPTED,
+        retryable=True,
+        failure=FailureInfo(category=ErrorCategory.INTERRUPTED, message="interrupted"),
+    )
+    service.store.save(manifest)
+
+    class VersionedAdapter(FakeAdapter):
+        def render_audio(self, manifest, slot_id):
+            assert previous.exists()
+            relative = f"variants/{slot_id}/preview-new-version.mp3"
+            (self.root / relative).write_bytes(b"new audio")
+            manifest.slot(slot_id).artifacts.audio = relative
+            manifest.slot(slot_id).audio = AudioInfo(state=AudioState.READY)
+
+    service.adapter_factory = VersionedAdapter
+    service.retry_audio(created.session_id, "01")
+    result = service.wait(created.session_id)
+    assert not previous.exists()
+    assert (
+        service.store.artifact_path(
+            created.session_id, result.slot("01").artifacts.audio
+        ).read_bytes()
+        == b"new audio"
+    )
 
 
 def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
@@ -289,4 +364,6 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     service.wait(created.session_id)
     with pytest.raises(ValueError, match="not in a retryable state"):
         service.retry_audio(created.session_id, "01")
-    assert [adapter.audio_calls for adapter in adapters] == [["01", "02", "03", "04"]]
+    assert [sorted(adapter.audio_calls) for adapter in adapters] == [
+        ["01", "02", "03", "04"]
+    ]

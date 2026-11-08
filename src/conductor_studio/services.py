@@ -27,7 +27,7 @@ from .models import (
     utc_now,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore
+from .storage import SessionStore, StorageError
 from .variation import create_manifest
 
 
@@ -65,9 +65,10 @@ class StudioService:
         self.max_audio_workers = max_workers
         self._state_lock = threading.RLock()
         self._coordinator_lock = threading.RLock()
+        # Per-run state, keyed by session and removed by the worker when the
+        # run ends, so abandoned UI streams leave nothing behind.
         self._active_session_id = None
         self._executors = {}
-        self._futures = {}
         self._callbacks = {}
         self._events = {}
 
@@ -80,12 +81,11 @@ class StudioService:
     def generation_active(self):
         return self.active_session_id is not None
 
-    def subscribe(self, session_id, callback):
-        with self._state_lock:
-            self._callbacks.setdefault(session_id, []).append(callback)
-
     def events(self, session_id, *, timeout=None):
-        queue = self._events.setdefault(session_id, Queue())
+        """Yield the active run's events until none arrive within `timeout`."""
+        queue = self._events.get(session_id)
+        if queue is None:
+            return
         while True:
             try:
                 yield queue.get(timeout=timeout)
@@ -101,8 +101,9 @@ class StudioService:
                 slot.progress,
                 manifest.model_copy(deep=True),
             )
-            self._events.setdefault(manifest.session_id, Queue()).put(event)
-            for callback in tuple(self._callbacks.get(manifest.session_id, ())):
+            if queue := self._events.get(manifest.session_id):
+                queue.put(event)
+            if callback := self._callbacks.get(manifest.session_id):
                 with suppress(Exception):  # UI observers are isolated
                     callback(event)
 
@@ -173,7 +174,8 @@ class StudioService:
         self._emit(saved)
         return saved
 
-    def _failure(self, session_id, failure):
+    def _failure(self, session_id, failure, outcome: AdapterFailure | None = None):
+        """Persist a failed batch; `outcome` adds any cost and usage Core reported."""
         with self._coordinator_lock:
             current = self.store.load(session_id)
             moment = utc_now()
@@ -184,6 +186,13 @@ class StudioService:
                     generation_ids=[],
                     failure=failure.model_dump(mode="python"),
                 )
+                if outcome is not None:
+                    data["batch"].update(
+                        total_cost=outcome.total_cost,
+                        input_tokens=outcome.input_tokens,
+                        output_tokens=outcome.output_tokens,
+                        total_tokens=outcome.total_tokens,
+                    )
                 for slot in data["slots"]:
                     slot.update(state="failed", progress=None, finished_at=moment)
                 data["status"] = "failed"
@@ -244,7 +253,7 @@ class StudioService:
             target["audio"] = AudioInfo(state=AudioState.RENDERING).model_dump(
                 mode="python"
             )
-            target["artifacts"]["audio"] = None
+            previous_audio = target["artifacts"]["audio"]
             local = self.store.save(SessionManifest.model_validate(data))
         self._emit(local)
         local = local.model_copy(deep=True)
@@ -267,6 +276,13 @@ class StudioService:
             target["audio"] = source.audio.model_dump(mode="python")
             target["artifacts"]["audio"] = source.artifacts.audio
             saved = self.store.save(SessionManifest.model_validate(data))
+            if (
+                previous_audio
+                and source.audio.state is AudioState.READY
+                and source.artifacts.audio != previous_audio
+            ):
+                with suppress(OSError, StorageError):
+                    self.store.artifact_path(session_id, previous_audio).unlink()
         self._emit(saved)
 
     def _run(self, session_id, adapter):
@@ -276,7 +292,7 @@ class StudioService:
                 lambda event: self._progress(session_id, event),
             )
             if isinstance(outcome, AdapterFailure):
-                self._failure(session_id, outcome.failure)
+                self._failure(session_id, outcome.failure, outcome)
                 return
             if (
                 not isinstance(outcome, NormalizedBatchResult)
@@ -312,10 +328,32 @@ class StudioService:
                         message="Generation failed.",
                     ),
                 )
-        finally:
-            with self._state_lock:
-                if self._active_session_id == session_id:
-                    self._active_session_id = None
+
+    def _start(self, session_id, work, *, on_event=None):
+        """Run `work` on a one-shot worker; the caller holds the state lock."""
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="studio-run")
+        self._executors[session_id] = executor
+        self._events[session_id] = Queue()
+        if on_event:
+            self._callbacks[session_id] = on_event
+        self._active_session_id = session_id
+
+        def run():
+            try:
+                work()
+            finally:
+                self._retire(session_id)
+
+        executor.submit(run)
+
+    def _retire(self, session_id):
+        # One locked step, so a new run for this session cannot interleave.
+        with self._state_lock:
+            self._active_session_id = None
+            self._events.pop(session_id, None)
+            self._callbacks.pop(session_id, None)
+            executor = self._executors.pop(session_id)
+        executor.shutdown(wait=False)
 
     def create_session(self, settings: SessionSettings, *, on_event=None):
         capability = (
@@ -332,60 +370,41 @@ class StudioService:
                 settings, core_version=CoreAdapter.core_version()
             )
             created = self.store.create(manifest)
-            if on_event:
-                self.subscribe(created.session_id, on_event)
-            self._events.setdefault(created.session_id, Queue())
             credentials = self.credentials.provider_credentials()
             root = self.store.session_dir(created.session_id, must_exist=True)
             adapter = self.adapter_factory(root, credentials)
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-batch"
+            self._start(
+                created.session_id,
+                lambda: self._run(created.session_id, adapter),
+                on_event=on_event,
             )
-            self._executors[created.session_id] = executor
-            self._active_session_id = created.session_id
-            self._futures[created.session_id] = {
-                "batch": executor.submit(self._run, created.session_id, adapter)
-            }
             return created
 
     start_generation = create_session
     generate = create_session
 
-    def wait(self, session_id, timeout=None):
-        for future in self._futures.get(session_id, {}).values():
-            future.result(timeout=timeout)
-        executor = self._executors.pop(session_id, None)
+    def wait(self, session_id):
+        """Block until the session's run (if any) ends, then load its manifest."""
+        with self._state_lock:
+            executor = self._executors.get(session_id)
         if executor:
             executor.shutdown(wait=True)
         return self.store.load(session_id)
 
     def retry_audio(self, session_id, slot_id):
-        manifest = self.store.load(session_id)
-        slot = manifest.slot(slot_id)
-        if not slot.audio_retryable:
-            raise ValueError("audio is not in a retryable state")
-        self.store.artifact_path(session_id, slot.artifacts.midi)
         with self._state_lock:
+            manifest = self.store.load(session_id)
+            slot = manifest.slot(slot_id)
+            if not slot.audio_retryable:
+                raise ValueError("audio is not in a retryable state")
+            self.store.artifact_path(session_id, slot.artifacts.midi)
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
             adapter = self.adapter_factory(
                 self.store.session_dir(session_id, must_exist=True),
                 self.credentials.provider_credentials(),
             )
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-audio"
-            )
-            self._executors[session_id] = executor
-            self._active_session_id = session_id
-
-            def run():
-                try:
-                    self._audio(session_id, slot_id, adapter)
-                finally:
-                    with self._state_lock:
-                        self._active_session_id = None
-
-            self._futures[session_id] = {slot_id: executor.submit(run)}
+            self._start(session_id, lambda: self._audio(session_id, slot_id, adapter))
         return manifest
 
     rerender_audio = retry_audio
@@ -411,12 +430,12 @@ class StudioService:
                 )
             return self.store.set_favorite(session_id, slot_id, favorite)
 
-    def move_to_trash(self, session_id):
-        # Holding the state lock keeps a retry from starting mid-move.
+    def delete_session(self, session_id):
+        # Holding the state lock keeps a retry from starting mid-deletion.
         with self._state_lock:
             if self._active_session_id == session_id:
-                raise ActiveSessionError("an active session cannot be moved to trash")
-            return self.store.move_to_trash(session_id)
+                raise ActiveSessionError("an active session cannot be deleted")
+            return self.store.delete_session(session_id)
 
 
 __all__ = ["ActiveSessionError", "ServiceEvent", "StudioService"]

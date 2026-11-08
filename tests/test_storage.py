@@ -17,6 +17,7 @@ from conductor_studio.storage import (
     SessionBusyError,
     SessionStore,
     StorageError,
+    UnsupportedSchemaError,
 )
 
 
@@ -62,6 +63,33 @@ def test_corrupt_current_recovers_previous(tmp_path) -> None:
     assert store.load(manifest.session_id).status.value == "queued"
 
 
+@pytest.mark.parametrize("damaged", ["[]", "null", "{}", '{"schema_version": "1"}'])
+def test_malformed_manifest_shape_recovers_previous(tmp_path, damaged) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()
+    store.create(manifest)
+    manifest.status = "running"
+    store.save(manifest)
+    (store.session_dir(manifest.session_id) / "session.json").write_text(damaged)
+    assert store.load(manifest.session_id).status.value == "queued"
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    recovered = store.recover_startup()
+    assert [item.status.value for item in recovered] == ["interrupted"]
+
+
+def test_future_schema_is_not_recovered_or_rewritten(tmp_path) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()
+    store.create(manifest)
+    store.save(manifest)
+    current = store.session_dir(manifest.session_id) / "session.json"
+    current.write_text('{"schema_version": 2}')
+    with pytest.raises(UnsupportedSchemaError):
+        store.load(manifest.session_id)
+    assert store.recover_startup() == []
+    assert current.read_text() == '{"schema_version": 2}'
+
+
 def test_recovery_interrupts_batch_and_automatic_audio_atomically(tmp_path) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
@@ -81,7 +109,7 @@ def test_recovery_interrupts_batch_and_automatic_audio_atomically(tmp_path) -> N
 @pytest.mark.parametrize(
     "batch_directory", ["core/variations", "core/generations/variations"]
 )
-def test_history_favorites_and_trash_moves_complete_session_tree(
+def test_history_favorites_and_delete_removes_complete_session_tree(
     tmp_path, batch_directory
 ) -> None:
     store = SessionStore(tmp_path / "studio")
@@ -102,11 +130,44 @@ def test_history_favorites_and_trash_moves_complete_session_tree(
     assert [(item.session_id, slot) for item, slot in store.favorites()] == [
         (manifest.session_id, "02")
     ]
-    moved = store.move_to_trash(manifest.session_id)
-    assert all((moved / relative).is_file() for relative in expected)
-    assert (moved / "session.json").is_file()
-    assert (moved / "session.previous.json").is_file()
-    assert store.load(manifest.session_id, in_trash=True).terminal
+    store.delete_session(manifest.session_id)
+    assert not session.exists()
+    assert store.history() == []
+    assert not (store.studio_root / "trash").exists()
+
+
+@pytest.mark.parametrize("session_id", ["../outside", "", "C:/outside"])
+def test_delete_rejects_unsafe_session_ids(tmp_path, session_id):
+    store = SessionStore(tmp_path)
+    with pytest.raises(ContainmentError, match="invalid session ID"):
+        store.delete_session(session_id)
+
+
+def test_delete_failure_has_safe_message_and_keeps_session(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path)
+    manifest = make_manifest()
+    complete(manifest)
+    store.create(manifest)
+    session = store.session_dir(manifest.session_id)
+    audio = session / "variants" / "01" / "preview.mp3"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"locked audio")
+    original_unlink = os.unlink
+
+    def fail(path, *args, **kwargs):
+        if str(path).endswith("preview.mp3"):
+            raise PermissionError("sensitive local path")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr("os.unlink", fail)
+    with pytest.raises(StorageError, match=r"^could not delete session$"):
+        store.delete_session(manifest.session_id)
+    assert store.load(manifest.session_id).terminal
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    assert audio.is_file()
+    monkeypatch.undo()
+    store.delete_session(manifest.session_id)
+    assert not session.exists()
 
 
 def test_recovery_interrupts_audio_without_invalidating_completed_midi(
@@ -125,6 +186,27 @@ def test_recovery_interrupts_audio_without_invalidating_completed_midi(
     assert loaded.slots[0].audio.failure.category.value == "interrupted"
     assert loaded.batch.failure is None
     assert store.recover_startup() == []
+
+
+def test_foreign_session_entries_do_not_block_history_or_recovery(tmp_path) -> None:
+    store = SessionStore(tmp_path / "studio")
+    manifest = make_manifest()  # queued, so startup recovery interrupts it
+    store.create(manifest)
+    (store.sessions_root / "notes").mkdir()
+    (store.sessions_root / "20260829-120001_nomanifest").mkdir()
+    if os.name == "nt":
+        import _winapi
+
+        # Junctions need no elevation and are not reported by is_symlink().
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _winapi.CreateJunction(
+            str(outside), str(store.sessions_root / "20260829-120002_junction")
+        )
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    assert [item.session_id for item in store.recover_startup()] == [
+        manifest.session_id
+    ]
 
 
 def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:
@@ -176,18 +258,18 @@ def test_core_generation_midi_rejects_symlink_escape(tmp_path) -> None:
         )
 
 
-def test_cannot_trash_active_session_or_load_invalid_pair(tmp_path) -> None:
+def test_cannot_delete_active_session_or_load_invalid_pair(tmp_path) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
     store.create(manifest)
     with pytest.raises(StorageError):
-        store.move_to_trash(manifest.session_id)
+        store.delete_session(manifest.session_id)
     session = store.session_dir(manifest.session_id)
     complete(manifest)
     manifest.slots[2].audio.state = AudioState.RENDERING
     store.save(manifest)
     with pytest.raises(SessionBusyError, match="rendering audio"):
-        store.move_to_trash(manifest.session_id)
+        store.delete_session(manifest.session_id)
     assert store.load(manifest.session_id).terminal
     (session / "session.json").write_text("bad")
     (session / "session.previous.json").write_text("bad")
