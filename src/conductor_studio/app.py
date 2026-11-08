@@ -1669,7 +1669,7 @@ def create_app(
         def refresh_favorite_media(
             selected: str | None, previous: tuple[str, ...]
         ) -> tuple[Any, ...]:
-            # Reload the manifest and republish files restored on disk. No
+            # Reload the manifest and recheck files restored on disk. No
             # audio_path is passed, so the player reloads instead of keeping a
             # stale source.
             return refreshed_favorites(selected, previous)
