@@ -10,7 +10,6 @@ from typing import Any
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
 from .models import (
-    AudioState,
     MidiState,
     SessionManifest,
     SessionSettings,
@@ -217,12 +216,6 @@ def _card_view(
     ]
     if unavailable:
         warnings.append(f"Unavailable: {', '.join(unavailable)}.")
-    retry_audio = (
-        slot.midi is MidiState.READY
-        and slot.audio.state
-        in {AudioState.FAILED, AudioState.UNAVAILABLE, AudioState.INTERRUPTED}
-        and slot.audio.retryable
-    )
     return CardView(
         slot.slot_id,
         f"Variant {int(slot.slot_id)}",
@@ -234,7 +227,7 @@ def _card_view(
         _slot_metadata(manifest),
         "\n".join(dict.fromkeys(warnings)),
         "★ Favorited" if slot.favorite else "☆ Favorite",
-        retry_audio,
+        slot.audio_retryable,
         slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
     )
 
@@ -309,7 +302,7 @@ def _audio_retry_notice(error: Exception) -> str:
     if isinstance(error, ActiveSessionError):
         return "Another generation is running. Retry audio when it finishes."
     if isinstance(error, ValueError):
-        return "Audio retry needs saved MIDI and a failed or interrupted render."
+        return "Audio retry needs saved MIDI and a failed, unavailable, or interrupted render."
     if isinstance(error, ContainmentError):
         return "The saved MIDI file is missing, so audio cannot be retried."
     return "Audio retry could not start. Check the local audio tools."
@@ -804,6 +797,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         _update(interactive=bool(card)),
         view.notice,
         card.audio_path if card else None,
+        _update(visible=bool(card and card.audio_retry_visible)),
     )
 
 
@@ -1094,6 +1088,10 @@ def create_app(
                             source_session = gr.Button(
                                 "Open source session", interactive=False
                             )
+                            favorite_audio_retry = gr.Button(
+                                "Retry audio", visible=False
+                            )
+                            refresh_media = gr.Button("Refresh media")
                         favorite_notice = gr.Markdown()
                     with gr.Column(elem_id="favorites-sidebar", scale=1):
                         gr.Markdown("### Favorite loops")
@@ -1229,6 +1227,7 @@ def create_app(
             source_session,
             favorite_notice,
             favorite_audio_path,
+            favorite_audio_retry,
         ]
 
         def refreshed_favorites(
@@ -1244,9 +1243,9 @@ def create_app(
                 selected, previous, entering=entering, notice=notice
             )
             values = list(_favorites_values(view))
-            values[8] = _update(
-                interactive=bool(view.card) and not controller.service.generation_active
-            )
+            idle = not controller.service.generation_active
+            values[8] = _update(interactive=bool(view.card) and idle)
+            values[12]["interactive"] = idle
             if (
                 preserve_audio
                 and view.selection == selected
@@ -1587,6 +1586,98 @@ def create_app(
                 favorite_choice,
             ],
             [*favorite_outputs, *app_outputs, history_choice],
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+
+        def retry_favorite_audio(
+            selected: str | None, chosen: str | None
+        ) -> Iterator[tuple[Any, ...]]:
+            # Audio-only: reuses the History retry path, which never calls an LLM.
+            # Only the retried identity and notice are written here, so the
+            # follow-up refresh reads whatever the user selected meanwhile.
+            if chosen != selected or not selected or "|" not in selected:
+                yield (
+                    None,
+                    "Wait for the selected loop to finish loading, then try again.",
+                    _skip(),
+                    _skip(),
+                )
+                return
+            yield (
+                _skip(),
+                _skip(),
+                _update(interactive=False),
+                _update(interactive=False),
+            )
+            source_id, slot_id = selected.split("|", 1)
+            notice = ""
+            try:
+                for view in controller.retry_audio(source_id, slot_id):
+                    notice = view.notice
+            except (StorageError, ContainmentError, OSError):
+                notice = "This favorite is unavailable. The collection was refreshed."
+            yield selected, notice, _skip(), _skip()
+
+        def refresh_after_favorite_retry(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None,
+            retried: str | None,
+            session: str | None,
+        ) -> tuple[Any, ...]:
+            values = list(
+                refresh_after_audio_retry(
+                    selected, previous, history_selected, audio_path, retried
+                )
+            )
+            values[11] = _skip()  # keep the retry notice
+            batch: list[Any] = [_skip()] * len(app_outputs)
+            # Update History cards only if they still show the retried session.
+            if retried and session == retried.split("|", 1)[0]:
+                with suppress(StorageError, ContainmentError, OSError):
+                    batch = _view_values(controller.reopen(session))
+            return (*values, *batch)
+
+        favorite_audio_retry.click(
+            retry_favorite_audio,
+            [favorite_selection, favorite_choice],
+            [audio_retry_selection, favorite_notice, unfavorite, favorite_audio_retry],
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="generation",
+        ).then(
+            refresh_after_favorite_retry,
+            [
+                favorite_selection,
+                favorite_order,
+                history_choice,
+                favorite_audio_path,
+                audio_retry_selection,
+                active_session,
+            ],
+            [history_choice, *favorite_outputs, *app_outputs],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+
+        def refresh_favorite_media(
+            selected: str | None, previous: tuple[str, ...]
+        ) -> tuple[Any, ...]:
+            # Reload the manifest and recheck files restored on disk. No
+            # audio_path is passed, so the player reloads instead of keeping a
+            # stale source.
+            return refreshed_favorites(selected, previous)
+
+        refresh_media.click(
+            refresh_favorite_media,
+            [favorite_selection, favorite_order],
+            favorite_outputs,
             js=_PAUSE_AUDIO_JS,
             api_visibility="private",
             concurrency_limit=1,

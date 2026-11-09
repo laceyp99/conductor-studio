@@ -125,7 +125,10 @@ automatically.
    starring and unstarring update the collection immediately. Use **Open
    source session** to see its original four variations in History.
    Changing loops stops playback; audio never starts automatically. Missing
-   files remain listed with a warning, and can still be unfavorited.
+   files remain listed with a warning, and can still be unfavorited. After
+   restoring a file, **Refresh media** rechecks the selected loop. **Retry
+   audio** re-renders a missing preview from saved MIDI, for example after
+   installing FluidSynth or FFmpeg; it never makes an LLM request.
 
 After successful MIDI publication, Studio derives loop JSON and piano-roll
 images and may render up to four MP3 previews. Those jobs are optional: a roll
