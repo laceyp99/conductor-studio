@@ -5,14 +5,16 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import conductor_core
-from conductor_core import playback
+from conductor_core import GenerationMetadata, playback
 from conductor_core.config import ProviderCredentials
+from conductor_core.storage import FilesystemArtifactStore, GenerationWorkspace
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
 from .storage import SessionStore
@@ -163,6 +165,62 @@ def _failure(error: BaseException) -> AdapterFailure:
     )
 
 
+class _StudioArtifactStore(FilesystemArtifactStore):
+    """Core's filesystem store, limited to what Studio may persist.
+
+    Core's default store writes raw provider messages into batch records and
+    absolute paths into child metadata. This store drops the messages and
+    records the MIDI by file name before anything is written. Studio renders
+    audio itself, so child records never reference audio.
+    """
+
+    def __init__(self, artifact_root: Path) -> None:
+        super().__init__(artifact_root, max_generations=None)
+
+    def save_variation_history(self, metadata: Any, generation_ids: Any) -> Any:
+        return super().save_variation_history(
+            metadata.model_copy(update={"messages": []}), generation_ids
+        )
+
+    def finalize_generation(
+        self,
+        workspace: GenerationWorkspace,
+        prompt: str,
+        key: str,
+        scale: str,
+        model: str,
+        provider: str,
+        temperature: float,
+        use_thinking: bool | None = None,
+        effort: str | None = None,
+        cost: float | None = None,
+        **_audio_and_retention: Any,
+    ) -> GenerationMetadata:
+        midi = Path(workspace.midi_path)
+        if not midi.is_file():
+            raise FileNotFoundError("Core did not write the generation MIDI")
+        record = GenerationMetadata(
+            id=workspace.id,
+            timestamp=datetime.now(),
+            prompt=prompt,
+            key=key,
+            scale=scale,
+            model=model,
+            provider=provider,
+            temperature=temperature,
+            use_thinking=use_thinking,
+            effort=effort,
+            cost=cost,
+            midi_path=midi.name,
+        )
+        SessionStore._atomic_bytes(
+            Path(workspace.metadata_path), record.model_dump_json(indent=2).encode()
+        )
+        # Core's loaders rebind paths to the generation folder; callers get the
+        # usable in-memory path, which Studio normalizes to a relative one.
+        return record.model_copy(update={"midi_path": workspace.midi_path})
+
+
 class CoreAdapter:
     def __init__(
         self,
@@ -204,7 +262,9 @@ class CoreAdapter:
             max_generations=None,
         )
         self._engine = (
-            conductor_core.LoopGenerationEngine(config=config)
+            conductor_core.LoopGenerationEngine(
+                config=config, store=_StudioArtifactStore(config.artifact_root)
+            )
             if self.engine_factory is None
             else self.engine_factory(config)
         )
