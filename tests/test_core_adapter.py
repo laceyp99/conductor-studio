@@ -1,4 +1,6 @@
+import logging
 from pathlib import Path
+from subprocess import CalledProcessError
 from types import SimpleNamespace
 
 import pytest
@@ -6,7 +8,9 @@ from conductor_core import (
     ProgressEvent,
     ProviderContextLengthError,
     ProviderCredentials,
+    ProviderRequestError,
 )
+from pydantic import BaseModel, ValidationError
 
 from conductor_studio.core_adapter import (
     AdapterFailure,
@@ -206,6 +210,150 @@ def test_context_length_error_explains_how_to_recover(tmp_path):
     assert outcome.failure.category is ErrorCategory.PROVIDER
     assert "ran out of context" in outcome.failure.message
     assert "Ollama context window" in outcome.failure.message
+
+
+def _model_validation_error():
+    class Loop(BaseModel):
+        bars: int
+
+    try:
+        Loop.model_validate_json('{"bars": "many"}')
+    except ValidationError as error:
+        return error
+    raise AssertionError("expected a validation error")
+
+
+@pytest.mark.parametrize(
+    ("error", "category", "message"),
+    [
+        (
+            ValueError("Model m did not call the build_MIDI_variations tool."),
+            ErrorCategory.VALIDATION,
+            "did not call the MIDI tool",
+        ),
+        (
+            _model_validation_error(),
+            ErrorCategory.VALIDATION,
+            "did not contain four valid variations",
+        ),
+        (
+            TypeError("unexpected keyword argument 'betas'"),
+            ErrorCategory.CORE,
+            "Studio or Conductor Core hit an internal error",
+        ),
+        (
+            ProviderRequestError("Anthropic", "overloaded", operation="request"),
+            ErrorCategory.PROVIDER,
+            "Provider request failed",
+        ),
+        (
+            ValueError("Unsupported OpenAI reasoning effort: max"),
+            ErrorCategory.VALIDATION,
+            "Conductor Core rejected",
+        ),
+    ],
+)
+def test_batch_failures_are_specific_and_logged(
+    tmp_path, caplog, error, category, message
+):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise error
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert isinstance(outcome, AdapterFailure)
+    assert outcome.failure.category is category
+    assert message in outcome.failure.message
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Generation batch failed ({category.value}): {outcome.diagnostic}"
+    ]
+
+
+_LOCAL_PATHS = (
+    r"C:\Users\pat\studio\gen.mid",
+    "/home/pat/gen.mid",
+    "/home/pat/My Music/gen.mid",
+    r"C:\Users\Pat Lacey\studio\gen.mid",
+    r"C:\Users\Lacey, Pat\studio\gen.mid",
+    "/home/pat/a;b/gen.mid",
+    r"\\nas\music\studio\gen.mid",
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "diagnostic"),
+    [
+        *(
+            (
+                PermissionError(13, "Permission denied", path),
+                "PermissionError: [Errno 13] Permission denied: [path]",
+            )
+            for path in _LOCAL_PATHS
+        ),
+        # Core's playback error carries the path unquoted.
+        *(
+            (
+                FileNotFoundError(f"MIDI file not found: {path}"),
+                "FileNotFoundError: MIDI file not found: [path]",
+            )
+            for path in _LOCAL_PATHS
+        ),
+        (
+            CalledProcessError(
+                1,
+                [
+                    "fluidsynth",
+                    r"C:\Program Files\GM.sf2",
+                    "/home/pat/My Music/gen.mid",
+                ],
+            ),
+            "CalledProcessError: Command '['fluidsynth', '[path]', '[path]']' "
+            "returned non-zero exit status 1.",
+        ),
+    ],
+)
+def test_logged_diagnostic_omits_local_paths(tmp_path, caplog, error, diagnostic):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise error
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert outcome.diagnostic == diagnostic
+    assert "gen.mid" not in caplog.text
+
+
+def test_wrong_count_failure_logs_core_diagnostic_without_secrets(tmp_path, caplog):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            result = _result(Path(tmp_path), indexes=(), received=3, status="failed")
+            result.diagnostic = SimpleNamespace(
+                code="wrong_count",
+                message="Provider returned 3 variations; expected 4. api_key=sk-x1",
+            )
+            return result
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert "did not contain four valid variations" in outcome.failure.message
+    assert "Provider returned 3 variations" in caplog.text
+    assert "sk-x1" not in caplog.text
 
 
 def test_request_sends_context_window_and_thinking_temperature(tmp_path):
