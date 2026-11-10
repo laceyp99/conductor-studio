@@ -29,10 +29,11 @@ _MISSING_TOOL_CALL = "did not call"
 # Core ValueError text for a model reply that cannot become four variations.
 _MODEL_OUTPUT_ERRORS = ("did not include", "wrong_count")
 # Logged diagnostics must not expose local paths. Quoted text holding a path
-# separator covers paths with spaces, network paths, and subprocess arguments;
-# the unquoted pattern covers absolute Windows or POSIX paths.
+# separator covers subprocess arguments and other quoted paths. An unquoted
+# Windows, network, or POSIX path may contain spaces, so it is redacted to the
+# end of its clause (a quote, comma, semicolon, or line break).
 _QUOTED_PATHS = re.compile(r"""(['"])[^'"]*[\\/][^'"]*\1""")
-_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|(?<![\w:/.])/)[^\s'",;]*""")
+_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]|(?<![\w:/.\\])/)[^'",;\r\n]*""")
 
 
 @dataclass(frozen=True)

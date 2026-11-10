@@ -275,6 +275,15 @@ def test_batch_failures_are_specific_and_logged(
     ]
 
 
+_LOCAL_PATHS = (
+    r"C:\Users\pat\studio\gen.mid",
+    "/home/pat/gen.mid",
+    "/home/pat/My Music/gen.mid",
+    r"C:\Users\Pat Lacey\studio\gen.mid",
+    r"\\nas\music\studio\gen.mid",
+)
+
+
 @pytest.mark.parametrize(
     ("error", "diagnostic"),
     [
@@ -283,12 +292,15 @@ def test_batch_failures_are_specific_and_logged(
                 PermissionError(13, "Permission denied", path),
                 "PermissionError: [Errno 13] Permission denied: [path]",
             )
-            for path in (
-                r"C:\Users\pat\studio\gen.mid",
-                "/home/pat/gen.mid",
-                r"C:\Users\Pat Lacey\studio\gen.mid",
-                r"\\nas\music\studio\gen.mid",
+            for path in _LOCAL_PATHS
+        ),
+        # Core's playback error carries the path unquoted.
+        *(
+            (
+                FileNotFoundError(f"MIDI file not found: {path}"),
+                "FileNotFoundError: MIDI file not found: [path]",
             )
+            for path in _LOCAL_PATHS
         ),
         (
             CalledProcessError(
