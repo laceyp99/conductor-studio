@@ -280,6 +280,8 @@ _LOCAL_PATHS = (
     "/home/pat/gen.mid",
     "/home/pat/My Music/gen.mid",
     r"C:\Users\Pat Lacey\studio\gen.mid",
+    r"C:\Users\Lacey, Pat\studio\gen.mid",
+    "/home/pat/a;b/gen.mid",
     r"\\nas\music\studio\gen.mid",
 )
 

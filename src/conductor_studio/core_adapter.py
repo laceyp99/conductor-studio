@@ -30,10 +30,10 @@ _MISSING_TOOL_CALL = "did not call"
 _MODEL_OUTPUT_ERRORS = ("did not include", "wrong_count")
 # Logged diagnostics must not expose local paths. Quoted text holding a path
 # separator covers subprocess arguments and other quoted paths. An unquoted
-# Windows, network, or POSIX path may contain spaces, so it is redacted to the
-# end of its clause (a quote, comma, semicolon, or line break).
+# Windows, network, or POSIX path has no reliable end (spaces, commas, and
+# semicolons are all valid), so it is redacted to the end of its line.
 _QUOTED_PATHS = re.compile(r"""(['"])[^'"]*[\\/][^'"]*\1""")
-_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]|(?<![\w:/.\\])/)[^'",;\r\n]*""")
+_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]|(?<![\w:/.\\])/)[^\r\n]*""")
 
 
 @dataclass(frozen=True)
