@@ -22,9 +22,14 @@ _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"\b(?:sk|key|token|ghp|xoxb)[-_][A-Za-z0-9_-]+\b"),
 )
+# Core ValueError text for a model that answered without calling its tool.
+_MISSING_TOOL_CALL = "did not call"
 # Core ValueError text for a model reply that cannot become four variations.
-_MODEL_OUTPUT_ERRORS = ("did not call", "did not include", "wrong_count")
-# Absolute Windows or POSIX paths; logged diagnostics must not expose local paths.
+_MODEL_OUTPUT_ERRORS = ("did not include", "wrong_count")
+# Logged diagnostics must not expose local paths. Quoted text holding a path
+# separator covers paths with spaces, network paths, and subprocess arguments;
+# the unquoted pattern covers absolute Windows or POSIX paths.
+_QUOTED_PATHS = re.compile(r"""(['"])[^'"]*[\\/][^'"]*\1""")
 _PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|(?<![\w:/.])/)[^\s'",;]*""")
 
 
@@ -102,6 +107,18 @@ def ollama_model_status(
     return {"model_capabilities": inspection.capabilities, "error": None}
 
 
+def _path_free(error: BaseException) -> str:
+    """Return error text for logs with local paths replaced by ``[path]``."""
+    if isinstance(error, OSError) and error.strerror:
+        # Build from errno and strerror so no filename can reach the text.
+        text = error.strerror
+        if error.errno is not None:
+            text = f"[Errno {error.errno}] {text}"
+        return f"{text}: [path]" if error.filename is not None else text
+    text = _QUOTED_PATHS.sub(r"\1[path]\1", str(error))
+    return _PATHS.sub("[path]", text)
+
+
 def _safe(value: Any, limit: int = 500) -> str:
     text = str(value) if value is not None else ""
     for pattern in _SECRETS:
@@ -130,6 +147,12 @@ def _failure(error: BaseException) -> AdapterFailure:
         )
     ):
         category, message = ErrorCategory.PROVIDER, "Provider request failed."
+    elif isinstance(error, ValueError) and _MISSING_TOOL_CALL in detail:
+        category, message = (
+            ErrorCategory.VALIDATION,
+            "The model did not call the MIDI tool, so no variations were "
+            "returned. Generating again may succeed.",
+        )
     elif isinstance(error, ValidationError) or (
         isinstance(error, ValueError) and any(x in detail for x in _MODEL_OUTPUT_ERRORS)
     ):
@@ -159,7 +182,7 @@ def _failure(error: BaseException) -> AdapterFailure:
         category, message = ErrorCategory.UNKNOWN, "Generation failed."
     return AdapterFailure(
         FailureInfo(category=category, message=message),
-        f"{type(error).__name__}: {_safe(_PATHS.sub('[path]', str(error)), 1000)}",
+        f"{type(error).__name__}: {_safe(_path_free(error), 1000)}",
     )
 
 

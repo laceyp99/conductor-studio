@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from subprocess import CalledProcessError
 from types import SimpleNamespace
 
 import pytest
@@ -201,7 +202,7 @@ def _model_validation_error():
         (
             ValueError("Model m did not call the build_MIDI_variations tool."),
             ErrorCategory.VALIDATION,
-            "did not contain four valid variations",
+            "did not call the MIDI tool",
         ),
         (
             _model_validation_error(),
@@ -247,22 +248,48 @@ def test_batch_failures_are_specific_and_logged(
     ]
 
 
-@pytest.mark.parametrize("path", [r"C:\Users\pat\studio\gen.mid", "/home/pat/gen.mid"])
-def test_logged_diagnostic_omits_local_paths(tmp_path, caplog, path):
+@pytest.mark.parametrize(
+    ("error", "diagnostic"),
+    [
+        *(
+            (
+                PermissionError(13, "Permission denied", path),
+                "PermissionError: [Errno 13] Permission denied: [path]",
+            )
+            for path in (
+                r"C:\Users\pat\studio\gen.mid",
+                "/home/pat/gen.mid",
+                r"C:\Users\Pat Lacey\studio\gen.mid",
+                r"\\nas\music\studio\gen.mid",
+            )
+        ),
+        (
+            CalledProcessError(
+                1,
+                [
+                    "fluidsynth",
+                    r"C:\Program Files\GM.sf2",
+                    "/home/pat/My Music/gen.mid",
+                ],
+            ),
+            "CalledProcessError: Command '['fluidsynth', '[path]', '[path]']' "
+            "returned non-zero exit status 1.",
+        ),
+    ],
+)
+def test_logged_diagnostic_omits_local_paths(tmp_path, caplog, error, diagnostic):
     class Engine:
         def __init__(self, config):
             pass
 
         def generate_variations(self, request, progress_callback):
-            raise PermissionError(13, "Permission denied", path)
+            raise error
 
     with caplog.at_level(logging.WARNING, logger="conductor_studio"):
         outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
             _manifest()
         )
-    assert (
-        outcome.diagnostic == "PermissionError: [Errno 13] Permission denied: '[path]'"
-    )
+    assert outcome.diagnostic == diagnostic
     assert "gen.mid" not in caplog.text
 
 
