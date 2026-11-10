@@ -9,9 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
-from .media import MediaPublisher
 from .models import (
-    AudioState,
     MidiState,
     SessionManifest,
     SessionSettings,
@@ -39,6 +37,10 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
 .piano-roll img { object-fit:contain !important; background:#10141d; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
+.delete-error { display:flex; gap:.8rem; padding:1rem; border:1px solid #d97070; border-left-width:4px; border-radius:10px; background:#351d25; color:#fff0f0; overflow-wrap:anywhere; }
+.delete-error-icon { flex:none; font-size:1.3rem; font-weight:700; }
+.delete-error strong { display:block; margin-bottom:.35rem; font-size:1rem; }
+.delete-error p { margin:0; font-size:.95rem; line-height:1.5; }
 .thinking-toggle { display:flex; flex-direction:column; gap:var(--spacing-lg); }
 .thinking-toggle .info-text { order:-1; margin:0; color:var(--block-title-text-color); font-size:var(--block-title-text-size); font-weight:var(--block-title-text-weight); }
 .thinking-toggle .checkbox-container { border:1px solid var(--input-border-color); border-radius:var(--input-radius); background:var(--input-background-fill); padding:var(--input-padding); box-shadow:var(--input-shadow); cursor:pointer; }
@@ -49,6 +51,9 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 #favorites-sidebar > * { flex-shrink:0; }
 #favorites-sidebar label { white-space:normal !important; overflow-wrap:anywhere; }
 #favorites-sidebar label:has(input:checked) { border:2px solid #91bfff !important; background:#263c59 !important; font-weight:700; }
+.settings-card { border:1px solid var(--border-color-primary); border-radius:14px; padding:1rem !important; background:var(--block-background-fill); }
+.settings-feedback { border-left:3px solid var(--color-accent); padding-left:.8rem; overflow-wrap:anywhere; }
+#settings-cards { align-items:stretch; gap:1rem; }
 @media (max-width:600px) { #favorites-layout { flex-direction:column-reverse !important; } #favorites-sidebar { width:100% !important; max-height:210px; } }
 """
 
@@ -84,6 +89,8 @@ class LibraryView:
     history_choices: tuple[tuple[str, str], ...] = ()
     favorite_choices: tuple[tuple[str, str], ...] = ()
     notice: str = ""
+    deletion_failed: bool = False
+    session_gone: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,11 +133,6 @@ class ControlView:
     context_visible: bool = False
 
 
-@dataclass(frozen=True)
-class CredentialView:
-    status: str
-
-
 def _empty_card(slot_id: str) -> CardView:
     return CardView(
         slot_id,
@@ -145,6 +147,13 @@ def _empty_card(slot_id: str) -> CardView:
         "☆ Favorite",
         False,
     )
+
+
+def _blank_view(enabled: bool, notice: str = "") -> AppView:
+    """Results with no session, used when the displayed session is gone."""
+    return AppView(
+        None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), enabled, notice
+    )  # type: ignore[arg-type]
 
 
 def _slot_metadata(manifest: SessionManifest) -> str:
@@ -207,12 +216,6 @@ def _card_view(
     ]
     if unavailable:
         warnings.append(f"Unavailable: {', '.join(unavailable)}.")
-    retry_audio = (
-        slot.midi is MidiState.READY
-        and slot.audio.state
-        in {AudioState.FAILED, AudioState.UNAVAILABLE, AudioState.INTERRUPTED}
-        and slot.audio.retryable
-    )
     return CardView(
         slot.slot_id,
         f"Variant {int(slot.slot_id)}",
@@ -224,7 +227,7 @@ def _card_view(
         _slot_metadata(manifest),
         "\n".join(dict.fromkeys(warnings)),
         "★ Favorited" if slot.favorite else "☆ Favorite",
-        retry_audio,
+        slot.audio_retryable,
         slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
     )
 
@@ -249,17 +252,13 @@ def _accounting(manifest: SessionManifest) -> str:
 def _view_for_manifest(
     manifest: SessionManifest,
     *,
-    publisher: MediaPublisher | None = None,
     store: Any | None = None,
     generate_enabled: bool | None = None,
     notice: str = "",
 ) -> AppView:
     cards = []
     for slot in manifest.slots:
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        if publisher and store:
-            with suppress(Exception):
-                published = publisher.publish_slot(store, manifest, slot)
+        published = _slot_paths(store, manifest, slot)
         cards.append(_card_view(manifest, slot, published, store))
     return AppView(
         manifest.session_id,
@@ -269,6 +268,20 @@ def _view_for_manifest(
         _accounting(manifest),
         manifest.batch.failure.message if manifest.batch.failure else "",
     )  # type: ignore[arg-type]
+
+
+def _slot_paths(
+    store: Any, manifest: SessionManifest, slot: VariantSlot
+) -> dict[str, Path | None]:
+    """Resolve available manifest artifacts directly beneath the session root."""
+    paths: dict[str, Path | None] = {"piano_roll": None, "audio": None, "midi": None}
+    if store is not None:
+        for kind in paths:
+            reference = getattr(slot.artifacts, kind)
+            if reference:
+                with suppress(ContainmentError, OSError, AttributeError):
+                    paths[kind] = store.artifact_path(manifest.session_id, reference)
+    return paths
 
 
 def _library_view(service: Any) -> LibraryView:
@@ -289,21 +302,18 @@ def _audio_retry_notice(error: Exception) -> str:
     if isinstance(error, ActiveSessionError):
         return "Another generation is running. Retry audio when it finishes."
     if isinstance(error, ValueError):
-        return "Audio retry needs saved MIDI and a failed or interrupted render."
+        return "Audio retry needs saved MIDI and a failed, unavailable, or interrupted render."
     if isinstance(error, ContainmentError):
         return "The saved MIDI file is missing, so audio cannot be retried."
     return "Audio retry could not start. Check the local audio tools."
 
 
 class StudioController:
-    def __init__(
-        self, service: Any, catalog: Any, credentials: Any, publisher: MediaPublisher
-    ) -> None:
-        self.service, self.catalog, self.credentials, self.publisher = (
+    def __init__(self, service: Any, catalog: Any, credentials: Any) -> None:
+        self.service, self.catalog, self.credentials = (
             service,
             catalog,
             credentials,
-            publisher,
         )
 
     def _view(
@@ -311,7 +321,6 @@ class StudioController:
     ) -> AppView:
         return _view_for_manifest(
             manifest,
-            publisher=self.publisher,
             store=self.service.store,
             generate_enabled=enabled,
             notice=notice,
@@ -370,14 +379,15 @@ class StudioController:
         self, session_id: str, initial: SessionManifest
     ) -> Iterator[AppView]:
         yield self._view(initial, enabled=False)
+        shown = initial
         while self.service.active_session_id == session_id:
             for event in self.service.events(session_id, timeout=0.25):
-                yield self._view(event.manifest, enabled=False)
-        try:
-            final = self.service.wait(session_id)
-        except Exception:
-            final = self.service.store.load(session_id)
-        yield self._view(final, enabled=True)
+                # Each save emits one event per slot carrying the same
+                # manifest, so render each distinct manifest once.
+                if event.manifest != shown:
+                    shown = event.manifest
+                    yield self._view(shown, enabled=False)
+        yield self._view(self.service.wait(session_id), enabled=True)
 
     def generate(
         self,
@@ -393,18 +403,13 @@ class StudioController:
         context_window: Any = None,
     ) -> Iterator[AppView]:
         if error := self.validate_prompt(prompt):
-            yield AppView(
-                None, tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS), True, error
-            )  # type: ignore[arg-type]
+            yield _blank_view(True, error)
             return
         try:
             capability = self.catalog.lookup(provider, model)
             if not capability.available:
-                yield AppView(
-                    None,
-                    tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                    True,
-                    capability.error or "The selected model is not ready.",
+                yield _blank_view(
+                    True, capability.error or "The selected model is not ready."
                 )
                 return
             manifest = self.service.create_session(
@@ -423,12 +428,10 @@ class StudioController:
             )
             yield from self._stream_session(manifest.session_id, manifest)
         except Exception:
-            yield AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
+            yield _blank_view(
                 True,
                 "Generation could not start. Check the selected model and settings.",
-            )  # type: ignore[arg-type]
+            )
 
     def retry_audio(self, session_id: str, slot_id: str) -> Iterator[AppView]:
         try:
@@ -436,10 +439,17 @@ class StudioController:
                 session_id, self.service.retry_audio(session_id, slot_id)
             )
         except Exception as error:
+            enabled = not self.service.generation_active
+            try:
+                manifest = self.service.store.load(session_id)
+            except (StorageError, ContainmentError, OSError):
+                # Another tab may have deleted this session.
+                yield _blank_view(
+                    enabled, "This session is no longer available. Open History."
+                )
+                return
             yield self._view(
-                self.service.store.load(session_id),
-                enabled=not self.service.generation_active,
-                notice=_audio_retry_notice(error),
+                manifest, enabled=enabled, notice=_audio_retry_notice(error)
             )
 
     def toggle_favorite(self, session_id: str | None, slot_id: str) -> AppView:
@@ -470,12 +480,7 @@ class StudioController:
             except (StorageError, ContainmentError, OSError):
                 manifest = None
         if manifest is None:
-            return AppView(
-                None,
-                tuple(_empty_card(s) for s in VariantSlot.SLOT_IDS),
-                not self.service.generation_active,
-                notice,
-            )  # type: ignore[arg-type]
+            return _blank_view(not self.service.generation_active, notice)
         return self._view(
             manifest, enabled=not self.service.generation_active, notice=notice
         )
@@ -527,9 +532,7 @@ class StudioController:
             (m, slot) for m, slot in favorites if f"{m.session_id}|{slot}" == selection
         )
         slot = manifest.slot(slot_id)
-        published = {"piano_roll": None, "audio": None, "midi": None}
-        with suppress(Exception):
-            published = self.publisher.publish_slot(self.service.store, manifest, slot)
+        published = _slot_paths(self.service.store, manifest, slot)
         card = _card_view(manifest, slot, published, self.service.store)
         return FavoritesView(
             choices,
@@ -548,49 +551,55 @@ class StudioController:
     def history(self) -> LibraryView:
         return _library_view(self.service)
 
-    def trash(self, session_id: str) -> LibraryView:
+    def delete_session(self, session_id: str) -> LibraryView:
         from .services import ActiveSessionError
 
+        deletion_failed = False
+        session_gone = False
         try:
-            self.service.move_to_trash(session_id)
+            self.service.delete_session(session_id)
         except (ActiveSessionError, SessionBusyError):
             notice = "This session is still working. Try again when it finishes."
         except ContainmentError:
-            notice = "This session was already moved or is missing."
+            notice = "This session was already deleted or is missing."
+            session_gone = True
         except StorageError:
-            notice = "Could not move this session to trash."
+            notice = "Could not delete this session."
+            deletion_failed = True
         else:
             notice = ""
-        return replace(_library_view(self.service), notice=notice)
-
-    def credentials_view(self) -> CredentialView:
-        from .catalog import DEFAULT_OLLAMA_HOST, _safe_host_label
-
-        parts = []
-        for s in self.credentials.statuses().values():
-            label = f"{s.provider.title()}: {s.label()}"
-            if s.provider == "ollama":
-                # Hosts are not secrets; show the effective origin so users can
-                # see what an override replaced.  Userinfo is never displayed.
-                host = self.credentials.resolve("ollama")
-                label += (
-                    f" ({_safe_host_label(host)})"
-                    if host
-                    else f" (default {DEFAULT_OLLAMA_HOST})"
-                )
-            parts.append(label)
-        return CredentialView(", ".join(parts))
+        return replace(
+            _library_view(self.service),
+            notice=notice,
+            deletion_failed=deletion_failed,
+            session_gone=session_gone,
+        )
 
     @staticmethod
     def audio_status() -> str:
         from .core_adapter import CoreAdapter
 
         ready, message = CoreAdapter.system_audio_readiness()
-        return "Audio preview: ready." if ready else message
+        return (
+            "**Tools ready** · MIDI works without audio previews."
+            if ready
+            else f"**Unavailable** · {message}\n\nMIDI still works."
+        )
+
+    def cloud_credentials_status(self) -> str:
+        """Show credential sources without implying provider authentication."""
+        names = {"openai": "OpenAI", "anthropic": "Anthropic", "google": "Gemini"}
+        statuses = self.credentials.statuses()
+        sources: dict[str, list[str]] = {}
+        for provider, name in names.items():
+            sources.setdefault(statuses[provider].label(), []).append(name)
+        return " · ".join(
+            f"{source}: {', '.join(providers)}" for source, providers in sources.items()
+        )
 
     def save_credentials(
         self, openai: str, anthropic: str, google: str, ollama: str
-    ) -> CredentialView:
+    ) -> None:
         for provider, value in (
             ("openai", openai),
             ("anthropic", anthropic),
@@ -600,12 +609,14 @@ class StudioController:
             # Blank fields keep the current value; use Clear to remove overrides.
             if value and value.strip():
                 self.credentials.set_override(provider, value)
-        return self.credentials_view()
 
-    def clear_credentials(self) -> CredentialView:
+    def clear_credentials(self) -> None:
         for provider in ("openai", "anthropic", "google", "ollama"):
             self.credentials.clear_override(provider)
-        return self.credentials_view()
+
+    def clear_ollama_host(self) -> None:
+        """Restore the environment/default host without clearing cloud keys."""
+        self.credentials.clear_override("ollama")
 
     def control_view(
         self,
@@ -681,11 +692,12 @@ class StudioController:
         if host and host.strip():
             self.credentials.set_override("ollama", host)
         readiness = self.catalog.refresh_ollama(self.credentials.resolve("ollama"))
-        return readiness, (
+        notice = (
             f"Ollama ready · {len(readiness.models)} model(s) discovered."
             if readiness.available
             else f"Ollama unavailable: {readiness.error or 'check the configured host.'}"
         )
+        return readiness, f"{notice} · Host: {readiness.host}"
 
 
 def _temperature_locked(capability: Any, thinking: bool, effort: str | None) -> bool:
@@ -785,6 +797,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         _update(interactive=bool(card)),
         view.notice,
         card.audio_path if card else None,
+        _update(visible=bool(card and card.audio_retry_visible)),
     )
 
 
@@ -916,7 +929,6 @@ def create_app(
         service,
         catalog,
         credentials,
-        MediaPublisher(Path(service.store.studio_root) / "served"),
     )
     providers = tuple(catalog.providers())
     provider_value = (
@@ -1037,8 +1049,8 @@ def create_app(
                     history_choice = gr.Dropdown(label="Saved sessions", choices=())
                     with gr.Row():
                         open_history = gr.Button("Open session")
-                        trash = gr.Button("Move to trash", variant="stop")
-                    history_notice = gr.Markdown()
+                        delete = gr.Button("Delete session permanently", variant="stop")
+                    history_notice = gr.HTML()
                 with (
                     gr.Tab("Favorites", id="favorites") as favorites_tab,
                     gr.Row(elem_id="favorites-layout"),
@@ -1076,33 +1088,59 @@ def create_app(
                             source_session = gr.Button(
                                 "Open source session", interactive=False
                             )
+                            favorite_audio_retry = gr.Button(
+                                "Retry audio", visible=False
+                            )
+                            refresh_media = gr.Button("Refresh media")
                         favorite_notice = gr.Markdown()
                     with gr.Column(elem_id="favorites-sidebar", scale=1):
                         gr.Markdown("### Favorite loops")
                         favorite_choice = gr.Radio(
                             label="Select a favorite loop",
+                            show_label=False,
                             choices=(),
                         )
                 with gr.Tab("Settings", id="settings") as settings_tab:
-                    gr.Markdown(
-                        "Credentials stay in process memory and are never written to session manifests."
-                    )
-                    openai_secret = gr.Textbox(type="password", label="OpenAI API key")
-                    anthropic_secret = gr.Textbox(
-                        type="password", label="Anthropic API key"
-                    )
-                    google_secret = gr.Textbox(type="password", label="Gemini API key")
-                    ollama_host = gr.Textbox(
-                        label="Ollama host", placeholder="http://localhost:11434"
-                    )
-                    save_credentials = gr.Button("Save in memory", variant="primary")
+                    with gr.Row(elem_id="settings-cards"):
+                        with gr.Column(min_width=280, elem_classes=["settings-card"]):
+                            gr.Markdown("### Cloud providers")
+                            credential_notice = gr.Markdown(
+                                controller.cloud_credentials_status(),
+                                elem_id="cloud-credential-status",
+                            )
+                            with gr.Accordion("Change API keys", open=False):
+                                openai_secret = gr.Textbox(
+                                    type="password", label="OpenAI API key"
+                                )
+                                anthropic_secret = gr.Textbox(
+                                    type="password", label="Anthropic API key"
+                                )
+                                google_secret = gr.Textbox(
+                                    type="password", label="Gemini API key"
+                                )
+                                save_credentials = gr.Button(
+                                    "Save keys in memory", variant="primary"
+                                )
+                        with gr.Column(min_width=280, elem_classes=["settings-card"]):
+                            gr.Markdown("### Ollama")
+                            ollama_notice = gr.Markdown(
+                                "Discovery has not run yet.",
+                                elem_id="ollama-status",
+                                elem_classes=["settings-feedback"],
+                            )
+                            ollama_host = gr.Textbox(
+                                label="Ollama host",
+                                placeholder="http://localhost:11434",
+                            )
+                            with gr.Row():
+                                save_host = gr.Button("Save host", variant="primary")
+                                default_host = gr.Button("Use default")
+                                refresh_ollama = gr.Button("Refresh models")
+                    with gr.Column(elem_classes=["settings-card"]):
+                        gr.Markdown("### Audio previews")
+                        gr.Markdown(controller.audio_status(), elem_id="audio-status")
                     clear_credentials = gr.Button("Clear session overrides")
-                    refresh_ollama = gr.Button("Refresh Ollama models")
-                    credential_notice = gr.Markdown(
-                        controller.credentials_view().status
-                    )
-                    gr.Markdown(controller.audio_status())
-                    ollama_notice = gr.Markdown()
+                    gr.Markdown("Resets keys and host to environment/default values.")
 
             # One shared result surface is shown under Generate and History and
             # hidden elsewhere. Reopen events update this same read-only batch
@@ -1189,6 +1227,7 @@ def create_app(
             source_session,
             favorite_notice,
             favorite_audio_path,
+            favorite_audio_retry,
         ]
 
         def refreshed_favorites(
@@ -1204,9 +1243,9 @@ def create_app(
                 selected, previous, entering=entering, notice=notice
             )
             values = list(_favorites_values(view))
-            values[8] = _update(
-                interactive=bool(view.card) and not controller.service.generation_active
-            )
+            idle = not controller.service.generation_active
+            values[8] = _update(interactive=bool(view.card) and idle)
+            values[12]["interactive"] = idle
             if (
                 preserve_audio
                 and view.selection == selected
@@ -1553,6 +1592,98 @@ def create_app(
             concurrency_id="library",
         )
 
+        def retry_favorite_audio(
+            selected: str | None, chosen: str | None
+        ) -> Iterator[tuple[Any, ...]]:
+            # Audio-only: reuses the History retry path, which never calls an LLM.
+            # Only the retried identity and notice are written here, so the
+            # follow-up refresh reads whatever the user selected meanwhile.
+            if chosen != selected or not selected or "|" not in selected:
+                yield (
+                    None,
+                    "Wait for the selected loop to finish loading, then try again.",
+                    _skip(),
+                    _skip(),
+                )
+                return
+            yield (
+                _skip(),
+                _skip(),
+                _update(interactive=False),
+                _update(interactive=False),
+            )
+            source_id, slot_id = selected.split("|", 1)
+            notice = ""
+            try:
+                for view in controller.retry_audio(source_id, slot_id):
+                    notice = view.notice
+            except (StorageError, ContainmentError, OSError):
+                notice = "This favorite is unavailable. The collection was refreshed."
+            yield selected, notice, _skip(), _skip()
+
+        def refresh_after_favorite_retry(
+            selected: str | None,
+            previous: tuple[str, ...],
+            history_selected: str | None,
+            audio_path: str | None,
+            retried: str | None,
+            session: str | None,
+        ) -> tuple[Any, ...]:
+            values = list(
+                refresh_after_audio_retry(
+                    selected, previous, history_selected, audio_path, retried
+                )
+            )
+            values[11] = _skip()  # keep the retry notice
+            batch: list[Any] = [_skip()] * len(app_outputs)
+            # Update History cards only if they still show the retried session.
+            if retried and session == retried.split("|", 1)[0]:
+                with suppress(StorageError, ContainmentError, OSError):
+                    batch = _view_values(controller.reopen(session))
+            return (*values, *batch)
+
+        favorite_audio_retry.click(
+            retry_favorite_audio,
+            [favorite_selection, favorite_choice],
+            [audio_retry_selection, favorite_notice, unfavorite, favorite_audio_retry],
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="generation",
+        ).then(
+            refresh_after_favorite_retry,
+            [
+                favorite_selection,
+                favorite_order,
+                history_choice,
+                favorite_audio_path,
+                audio_retry_selection,
+                active_session,
+            ],
+            [history_choice, *favorite_outputs, *app_outputs],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+
+        def refresh_favorite_media(
+            selected: str | None, previous: tuple[str, ...]
+        ) -> tuple[Any, ...]:
+            # Reload the manifest and recheck files restored on disk. No
+            # audio_path is passed, so the player reloads instead of keeping a
+            # stale source.
+            return refreshed_favorites(selected, previous)
+
+        refresh_media.click(
+            refresh_favorite_media,
+            [favorite_selection, favorite_order],
+            favorite_outputs,
+            js=_PAUSE_AUDIO_JS,
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="library",
+        )
+
         def open_source_event(
             selected: str | None, previous: tuple[str, ...], chosen: str | None
         ) -> tuple[Any, ...]:
@@ -1632,53 +1763,119 @@ def create_app(
             concurrency_limit=1,
             concurrency_id="library",
         )
-        trash.click(
-            lambda selected, favorite, previous: (
+
+        def delete_event(
+            selected: str | None,
+            displayed: str | None,
+            favorite: str | None,
+            previous: tuple[str, ...],
+        ) -> tuple[Any, ...]:
+            view = controller.delete_session(selected)
+            # Reconcile the displayed session even if another tab deleted it.
+            results_values: list[Any] = [_skip()] * len(app_outputs)
+            if (
+                selected
+                and selected == displayed
+                and (not view.notice or view.session_gone)
+            ):
+                results_values = _view_values(
+                    _blank_view(not controller.service.generation_active)
+                )
+            notice = view.notice
+            if view.deletion_failed:
+                notice = (
+                    '<div class="delete-error" role="alert">'
+                    '<span class="delete-error-icon" aria-hidden="true">!</span>'
+                    "<div><strong>Couldn't finish deleting this session</strong>"
+                    "<p>Some files may already be removed. Close any app using this "
+                    "session's files, then try deleting it again.</p></div></div>"
+                )
+            return (
                 _update(
-                    choices=list((view := controller.trash(selected)).history_choices),
-                    value=None,
+                    choices=list(view.history_choices),
+                    value=selected
+                    if view.notice
+                    and selected in {value for _, value in view.history_choices}
+                    else None,
                 ),
                 *refreshed_favorites(favorite, previous, notice=view.notice),
-                view.notice,
-            ),
-            [history_choice, favorite_selection, favorite_order],
-            [history_choice, *favorite_outputs, history_notice],
+                notice,
+                *results_values,
+            )
+
+        def clear_history_notice() -> str:
+            return ""
+
+        history_choice.input(
+            clear_history_notice,
+            outputs=history_notice,
+            api_visibility="private",
+            queue=False,
+        )
+
+        delete.click(
+            delete_event,
+            [history_choice, active_session, favorite_selection, favorite_order],
+            [history_choice, *favorite_outputs, history_notice, *app_outputs],
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="library",
         )
-        secret_outputs = [
-            credential_notice,
+        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
+        credential_outputs = [
+            *ollama_outputs,
             openai_secret,
             anthropic_secret,
             google_secret,
             ollama_host,
         ]
         save_credentials.click(
-            lambda a, b, c, d: (
-                controller.save_credentials(a, b, c, d).status,
+            lambda a, b, c, current: (
+                *_credential_values(
+                    controller,
+                    lambda: controller.save_credentials(a, b, c, ""),
+                    current,
+                ),
                 _update(""),
                 _update(""),
                 _update(""),
-                _update(d.strip() if d else ""),
+                _skip(),
             ),
-            [openai_secret, anthropic_secret, google_secret, ollama_host],
-            secret_outputs,
+            [openai_secret, anthropic_secret, google_secret, provider],
+            credential_outputs,
+            api_visibility="private",
+        )
+        save_host.click(
+            lambda host, current: _credential_values(
+                controller,
+                lambda: controller.save_credentials("", "", "", host),
+                current,
+            ),
+            [ollama_host, provider],
+            ollama_outputs,
+            api_visibility="private",
+        )
+        default_host.click(
+            lambda current: (
+                *_credential_values(controller, controller.clear_ollama_host, current),
+                _update(""),
+            ),
+            provider,
+            [*ollama_outputs, ollama_host],
             api_visibility="private",
         )
         clear_credentials.click(
-            lambda: (
-                controller.clear_credentials().status,
+            lambda current: (
+                *_credential_values(controller, controller.clear_credentials, current),
                 _update(""),
                 _update(""),
                 _update(""),
                 _update(""),
             ),
-            None,
-            secret_outputs,
+            provider,
+            credential_outputs,
             api_visibility="private",
         )
-        ollama_outputs = [provider, *control_outputs, ollama_notice, credential_notice]
         refresh_ollama.click(
             lambda host, current: _ollama_values(controller, host, current, True),
             [ollama_host, provider],
@@ -1721,8 +1918,26 @@ def _ollama_values(
         _update(choices=list(providers), value=selected),
         *control_values,
         notice,
-        controller.credentials_view().status,
+        controller.cloud_credentials_status(),
     )
+
+
+def _credential_values(
+    controller: StudioController,
+    change: Callable[[], None],
+    current: str | None,
+) -> tuple[Any, ...]:
+    """Apply a Settings credential change, rediscovering Ollama if its host moved.
+
+    Generation reads the host from the credential store, so the model list and
+    capability cache must follow it.  Returns values for the Ollama outputs.
+    """
+    before = controller.credentials.resolve("ollama")
+    change()
+    status = controller.cloud_credentials_status()
+    if controller.credentials.resolve("ollama") == before:
+        return (*(_skip(),) * 9, status)
+    return _ollama_values(controller, "", current, current == "Ollama")
 
 
 def _skip() -> Any:
@@ -1735,7 +1950,6 @@ __all__ = [
     "AppView",
     "CardView",
     "ControlView",
-    "CredentialView",
     "LibraryView",
     "StudioController",
     "create_app",

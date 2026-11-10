@@ -1,7 +1,16 @@
 import os
 
+import gradio as gr
+import pytest
+from gradio.data_classes import _StaticFiles
+
 from conductor_studio import cli
 from conductor_studio.app import _CSS
+
+
+@pytest.fixture(autouse=True)
+def isolate_static_paths(monkeypatch):
+    monkeypatch.setattr(_StaticFiles, "all_paths", [])
 
 
 class FakeApp:
@@ -37,17 +46,15 @@ def test_main_launches_localhost_with_contained_file_policy(
         "server_port": 9876,
         "share": False,
         "enable_monitoring": False,
-        "allowed_paths": [str((tmp_path / "studio" / "served").resolve())],
+        "allowed_paths": [str((tmp_path / "studio" / "sessions").resolve())],
         "blocked_paths": [
-            str((tmp_path / "studio" / "sessions").resolve()),
-            str((tmp_path / "studio" / "trash").resolve()),
+            str(gr.utils.get_upload_folder()),
         ],
         "head": f"<style>{_CSS}</style>",
     }
-    served = tmp_path / "studio" / "served"
-    assert served.is_dir()
-    assert not (tmp_path / "studio" / "sessions").exists()
-    assert not (tmp_path / "studio" / "trash").exists()
+    sessions = tmp_path / "studio" / "sessions"
+    assert sessions.is_dir()
+    assert sessions.resolve() in _StaticFiles.all_paths
 
 
 def test_network_opt_in_emits_unavoidable_warning(

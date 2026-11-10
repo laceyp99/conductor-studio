@@ -12,7 +12,7 @@ from conductor_studio.catalog import DEFAULT_PROVIDER, ModelCatalog
 
 
 def test_core_public_contract_is_available() -> None:
-    assert version("conductor-core") == "0.10.0"
+    assert version("conductor-core") == "0.12.7"
 
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
@@ -187,7 +187,7 @@ def test_pinned_metadata_yields_the_expected_reasoning_controls() -> None:
     assert "none" not in catalog.lookup("Anthropic", "claude-opus-5-5").effort_choices
     assert catalog.lookup("OpenAI", "gpt-5.1").effort_choices[0] == "none"
     # Core lists each provider's newest model first; the UI opens on it.
-    assert catalog.models(DEFAULT_PROVIDER)[0].model == "gemini-3.8-flash"
+    assert catalog.models(DEFAULT_PROVIDER)[0].model == "gemini-4-argon"
 
 
 def test_core_engine_supports_unlimited_isolated_storage(tmp_path) -> None:

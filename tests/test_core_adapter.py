@@ -110,7 +110,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.10.0", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.12.7", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -137,6 +137,33 @@ def test_wrong_count_indexes_missing_and_unsafe_paths_are_rejected(tmp_path):
     escaped.items[0].generation.midi_path = str(outside)
     with pytest.raises(ValueError, match="unsafe"):
         adapter.normalize_result(escaped)
+
+
+@pytest.mark.parametrize("problem", ["wrong_count", "missing_midi"])
+def test_rejected_batch_keeps_core_accounting(tmp_path, problem):
+    calls = []
+
+    class Engine:
+        def __init__(self, config):
+            self.root = Path(config.artifact_root)
+
+        def generate_variations(self, request, progress_callback):
+            calls.append(request)
+            if problem == "wrong_count":
+                return _result(self.root, indexes=(), received=3, status="failed")
+            result = _result(self.root)
+            Path(result.items[0].generation.midi_path).unlink()
+            return result
+
+    outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(_manifest())
+    assert isinstance(outcome, AdapterFailure)
+    assert len(calls) == 1
+    assert (
+        outcome.total_cost,
+        outcome.input_tokens,
+        outcome.output_tokens,
+        outcome.total_tokens,
+    ) == (0.12, 10, 20, 30)
 
 
 def test_symlinked_midi_is_rejected(tmp_path):
@@ -371,7 +398,12 @@ def test_audio_only_render_uses_variant_preview(tmp_path):
     adapter = CoreAdapter(
         tmp_path, playback_factory=Playback, default_soundfont_path="x.sf2"
     )
-    assert adapter.render_audio(manifest, "04") == "variants/04/preview.mp3"
+    first = adapter.render_audio(manifest, "04")
+    second = adapter.render_audio(manifest, "04")
+    assert first.startswith("variants/04/preview-")
+    assert first.endswith(".mp3")
+    assert first != second
+    assert slot.artifacts.audio == second
     assert slot.audio.state is AudioState.READY
 
 
