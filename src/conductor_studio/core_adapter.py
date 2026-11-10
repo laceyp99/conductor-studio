@@ -162,8 +162,12 @@ def _failure(error: BaseException) -> AdapterFailure:
             "Generating again may succeed.",
         )
     elif isinstance(error, TypeError):
-        # A TypeError is a Core or dependency bug, not a settings problem.
-        category, message = ErrorCategory.CORE, "Conductor Core failed."
+        # A TypeError is a Studio, Core, or dependency bug, not a settings problem.
+        category, message = (
+            ErrorCategory.CORE,
+            "Studio or Conductor Core hit an internal error. "
+            "Check the terminal for details.",
+        )
     elif isinstance(error, ValueError):
         category, message = (
             ErrorCategory.VALIDATION,

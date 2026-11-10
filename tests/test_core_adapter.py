@@ -212,7 +212,7 @@ def _model_validation_error():
         (
             TypeError("unexpected keyword argument 'betas'"),
             ErrorCategory.CORE,
-            "Conductor Core failed",
+            "Studio or Conductor Core hit an internal error",
         ),
         (
             ProviderRequestError("Anthropic", "overloaded", operation="request"),
