@@ -12,6 +12,7 @@ dependencies = [
     "conductor-core[providers] @ git+https://github.com/laceyp99/conductor-core.git@586f5220a73461eae7e6ad5aa74fd6d0f21ff83c",
     "gradio==6.26.0",
     "matplotlib>=3.9,<4",
+    "plotly>=6,<7",
     "pydantic>=2.11,<3",
 ]
 

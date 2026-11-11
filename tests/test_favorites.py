@@ -209,7 +209,7 @@ def test_media_warnings_match_history_and_favorites_without_hiding_usable_files(
     favorite_card = controller.favorites_view(identity(newer, "01")).card
     assert history_card.warning == favorite_card.warning == f"Unavailable: {label}."
     for media_kind, field in (
-        ("piano_roll", "image_path"),
+        ("piano_roll", "piano_roll"),
         ("audio", "audio_path"),
         ("midi", "midi_path"),
     ):
@@ -629,7 +629,7 @@ def test_deleting_the_displayed_session_clears_results_and_artifacts(favorites):
     app = build_app(controller)
     card = controller.reopen(newer.session_id).cards[0]
     session_dir = store.session_dir(newer.session_id)
-    assert card.image_path
+    assert card.piano_roll is not None
     assert card.audio_path
     assert card.midi_path
     other = controller.reopen(older.session_id).cards[0].midi_path
@@ -738,3 +738,69 @@ def test_audio_retry_for_a_deleted_session_shows_unavailable(favorites):
     assert view.session_id is None
     assert "no longer available" in view.notice
     assert view.generate_enabled
+
+
+@pytest.mark.parametrize("payload", ['{"bars": []}', "{broken", None])
+def test_saved_roll_in_results_and_favorites(favorites, payload):
+    from conductor_studio.app import _favorites_values
+    from conductor_studio.piano_roll import render_loop
+
+    controller, store, _, manifest = favorites
+    manifest = store.load(manifest.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/piano-roll.png"
+    slot.artifacts.loop = "variants/01/loop.json" if payload is not None else None
+    directory = store.session_dir(manifest.session_id) / "variants/01"
+    render_loop({"bars": []}, directory / "piano-roll.png")
+    if payload is not None:
+        (directory / "loop.json").write_text(payload, encoding="utf-8")
+    store.save(manifest)
+
+    results = controller.reopen(manifest.session_id)
+    favorite = controller.favorites_view(identity(manifest, "01"))
+    result_plot = _view_values(results)[3]
+    favorite_plot = _favorites_values(favorite)[5]
+    assert result_plot.to_json() == favorite_plot.to_json()
+    import gradio as gr
+
+    serialized = gr.Plot().postprocess(result_plot)
+    assert serialized.type == "plotly"
+    if payload == '{"bars": []}':
+        assert any(
+            a.text == "No notes in this loop" for a in result_plot.layout.annotations
+        )
+    else:
+        assert result_plot.data[0].type == "image"
+        assert result_plot.data[0].source.startswith("data:image/png;base64,")
+    assert ("Interactive piano roll unavailable" in results.cards[0].warning) == (
+        payload == "{broken"
+    )
+
+
+def test_piano_roll_components_are_interactive_plots(favorites):
+    controller, _, _, _ = favorites
+    config = build_app(controller).get_config_file()
+    rolls = [
+        component
+        for component in config["components"]
+        if "piano-roll" in component["props"].get("elem_classes", [])
+    ]
+    assert len(rolls) == 5
+    assert all(component["type"] == "plot" for component in rolls)
+    assert all(component["props"]["show_label"] is False for component in rolls)
+
+
+def test_missing_png_does_not_warn_when_interactive_roll_is_available(favorites):
+    controller, store, _, manifest = favorites
+    manifest = store.load(manifest.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/missing.png"
+    slot.artifacts.loop = "variants/01/loop.json"
+    path = store.session_dir(manifest.session_id) / slot.artifacts.loop
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"bars": []}', encoding="utf-8")
+    store.save(manifest)
+
+    view = controller.reopen(manifest.session_id)
+    assert view.cards[0].piano_roll is not None
+    assert "Unavailable: piano roll" not in view.cards[0].warning

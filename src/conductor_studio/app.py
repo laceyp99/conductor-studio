@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -35,7 +37,10 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 #variant-grid { display:grid !important; grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:1rem; align-items:start; }
 #variant-grid > .variant-card { width:100% !important; min-width:0 !important; flex:none !important; }
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
-.piano-roll img { object-fit:contain !important; background:#10141d; }
+.piano-roll .modebar { left:2px !important; right:auto !important; top:2px !important; display:flex; flex-direction:column; }
+.piano-roll .modebar-group { display:flex !important; flex-direction:column !important; padding:0 !important; }
+.piano-roll .modebar-btn { width:20px !important; height:20px !important; padding:2px !important; }
+.piano-roll .modebar-btn svg { width:14px; height:14px; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
 .delete-error { display:flex; gap:.8rem; padding:1rem; border:1px solid #d97070; border-left-width:4px; border-radius:10px; background:#351d25; color:#fff0f0; overflow-wrap:anywhere; }
 .delete-error-icon { flex:none; font-size:1.3rem; font-weight:700; }
@@ -64,7 +69,6 @@ class CardView:
     title: str
     status: str
     progress: str
-    image_path: str | None
     audio_path: str | None
     midi_path: str | None
     metadata: str
@@ -72,6 +76,7 @@ class CardView:
     favorite_label: str
     audio_retry_visible: bool
     favorite_enabled: bool = False
+    piano_roll: Any = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +146,6 @@ def _empty_card(slot_id: str) -> CardView:
         "Queued",
         None,
         None,
-        None,
         "Parameters will appear here.",
         "",
         "☆ Favorite",
@@ -205,6 +209,33 @@ def _card_view(
     warnings = [*slot.warnings]
     if slot.audio.failure:
         warnings.append(slot.audio.failure.message)
+    figure = None
+    if store is not None and slot.artifacts.loop:
+        try:
+            from .piano_roll import build_loop_figure
+
+            loop_path = store.artifact_path(manifest.session_id, slot.artifacts.loop)
+            figure = build_loop_figure(
+                json.loads(loop_path.read_text(encoding="utf-8"))
+            )
+        except (StorageError, OSError, ValueError, TypeError, AttributeError):
+            warnings.append(
+                "Interactive piano roll unavailable; showing saved image if available."
+            )
+    if figure is None and published.get("piano_roll"):
+        with suppress(OSError, ValueError):
+            import plotly.graph_objects as go
+
+            encoded = base64.b64encode(published["piano_roll"].read_bytes()).decode(
+                "ascii"
+            )
+            figure = go.Figure(go.Image(source=f"data:image/png;base64,{encoded}"))
+            figure.update_layout(
+                height=220,
+                margin={"l": 0, "r": 0, "t": 0, "b": 0},
+                xaxis={"visible": False},
+                yaxis={"visible": False},
+            )
     unavailable = [
         label
         for kind, label, ref in (
@@ -212,7 +243,7 @@ def _card_view(
             ("audio", "audio preview", slot.artifacts.audio),
             ("midi", "MIDI", slot.artifacts.midi),
         )
-        if ref and not published.get(kind)
+        if ref and not published.get(kind) and (kind != "piano_roll" or figure is None)
     ]
     if unavailable:
         warnings.append(f"Unavailable: {', '.join(unavailable)}.")
@@ -221,7 +252,6 @@ def _card_view(
         f"Variant {int(slot.slot_id)}",
         status,
         f"{progress.message if progress and progress.message else status}{fraction}",
-        str(published["piano_roll"]) if published.get("piano_roll") else None,
         str(published["audio"]) if published.get("audio") else None,
         str(published["midi"]) if published.get("midi") else None,
         _slot_metadata(manifest),
@@ -229,6 +259,7 @@ def _card_view(
         "★ Favorited" if slot.favorite else "☆ Favorite",
         slot.audio_retryable,
         slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
+        figure,
     )
 
 
@@ -736,7 +767,7 @@ def _view_values(view: AppView) -> list[Any]:
                     visible=card.status != "Ready" and card.progress != card.status,
                 ),
                 _update(card.warning, visible=bool(card.warning)),
-                card.image_path,
+                card.piano_roll,
                 card.audio_path,
                 _update(card.midi_path, visible=bool(card.midi_path)),
                 _update(
@@ -788,7 +819,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         tuple(value for _, value in view.choices),
         view.title,
         _update(card.warning if card else "", visible=bool(card and card.warning)),
-        card.image_path if card else None,
+        card.piano_roll if card else None,
         card.audio_path if card else None,
         _update(
             card.midi_path if card else None, visible=bool(card and card.midi_path)
@@ -826,12 +857,9 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         status = gr.Markdown(f"### Variant {int(slot_id)} · Waiting")
         progress = gr.Markdown("Queued")
         warning = gr.Markdown(visible=False)
-        image = gr.Image(
-            type="filepath",
-            interactive=False,
-            buttons=["download", "fullscreen"],
-            height=220,
+        image = gr.Plot(
             label=f"Piano roll for Variant {int(slot_id)}",
+            show_label=False,
             elem_classes=["piano-roll"],
         )
         audio = gr.Audio(
@@ -1058,12 +1086,9 @@ def create_app(
                     with gr.Column(elem_id="favorites-main", scale=3):
                         favorite_title = gr.Markdown("No favorite loops yet.")
                         favorite_warning = gr.Markdown(visible=False)
-                        favorite_image = gr.Image(
-                            type="filepath",
-                            interactive=False,
-                            buttons=["download", "fullscreen"],
-                            height=300,
+                        favorite_image = gr.Plot(
                             label="Favorite piano roll",
+                            show_label=False,
                             elem_classes=["piano-roll"],
                         )
                         favorite_audio = gr.Audio(
