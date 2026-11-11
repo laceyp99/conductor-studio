@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.12.7 from the immutable commit below, never
+Studio installs Conductor Core v0.12.10 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-38b341fa742a32f2fc4b2bf176924cbb012106f5
+586f5220a73461eae7e6ad5aa74fd6d0f21ff83c
 ```
 
 ## Credentials and controls

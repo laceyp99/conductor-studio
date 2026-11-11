@@ -287,6 +287,9 @@ def test_core_discovery_inspects_only_selection_and_refresh_invalidates_cache(
         def __init__(self, host):
             self.host = host
 
+        def close(self):
+            pass
+
         def list(self):
             calls.append((self.host, "list"))
             return SimpleNamespace(
