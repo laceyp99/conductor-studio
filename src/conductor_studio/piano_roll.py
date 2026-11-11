@@ -22,6 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
@@ -223,6 +224,133 @@ def _pitch_bounds(notes: Sequence[_RenderedNote]) -> tuple[int, int]:
     return lower, upper
 
 
+def build_loop_figure(loop: Any) -> go.Figure:
+    """Build an interactive four-bar roll from the same notes as PNG exports."""
+    notes = _notes(loop)
+    background, black_key, grid, bar_grid, text = (
+        "#1a1a2e",
+        "#252540",
+        "#2a2a4a",
+        "#4a4a6a",
+        "#e0e0e0",
+    )
+    minimum = max(MIDI_MIN, min(note.midi for note in notes) - 1) if notes else 48
+    maximum = min(MIDI_MAX, max(note.midi for note in notes) + 1) if notes else 72
+    figure = go.Figure()
+    for pitch in range(minimum, maximum + 1):
+        if pitch % 12 in {1, 3, 6, 8, 10}:
+            figure.add_shape(
+                type="rect",
+                x0=0,
+                x1=LOOP_SIXTEENTHS,
+                y0=pitch - 0.5,
+                y1=pitch + 0.5,
+                fillcolor=black_key,
+                line={"width": 0},
+                layer="below",
+            )
+    for position in range(0, LOOP_SIXTEENTHS + 1, 4):
+        is_bar = position % SIXTEENTHS_PER_BAR == 0
+        figure.add_shape(
+            type="line",
+            x0=position,
+            x1=position,
+            y0=minimum - 0.5,
+            y1=maximum + 0.5,
+            line={"color": bar_grid if is_bar else grid, "width": 2 if is_bar else 1},
+            layer="below",
+        )
+    for bar in range(BAR_COUNT):
+        figure.add_annotation(
+            x=bar * SIXTEENTHS_PER_BAR + 8,
+            y=maximum + 1,
+            text=f"Bar {bar + 1}",
+            showarrow=False,
+            font={"color": text, "size": 12},
+            yanchor="bottom",
+        )
+    colors, hover = [], []
+    duration_labels = {1: "1/16", 2: "1/8", 4: "1/4", 8: "1/2", 16: "1 bar"}
+    for note in notes:
+        amount = note.velocity / 127.0
+        colors.append(
+            f"rgb({int(45 + amount * 210)},{int(27 + amount * 80)},{int(78 + amount * 13)})"
+        )
+        bar = int(note.start // 16) + 1
+        beat = int((note.start % 16) // 4) + 1
+        subdivision = int(note.start % 4) + 1
+        duration = int(note.end - note.start)
+        duration_label = duration_labels.get(duration, f"{duration}/16")
+        hover.append(
+            f"Note: {_pitch_label(note.midi)} (MIDI {note.midi})<br>"
+            f"Velocity: {note.velocity}<br>"
+            f"Position: Bar {bar}, Beat {beat}.{subdivision}<br>"
+            f"Duration: {duration_label} ({duration} sixteenths)"
+        )
+    if notes:
+        # Bars provide hover targets across the full note rectangle.
+        figure.add_trace(
+            go.Bar(
+                orientation="h",
+                base=[note.start for note in notes],
+                x=[note.end - note.start for note in notes],
+                y=[note.midi for note in notes],
+                width=0.8,
+                marker={
+                    "color": colors,
+                    "line": {"color": "rgba(255,255,255,0.3)", "width": 1},
+                },
+                hovertext=hover,
+                hovertemplate="%{hovertext}<extra></extra>",
+                hoverlabel={"bgcolor": grid, "font_size": 12, "font_color": text},
+            )
+        )
+    else:
+        figure.add_annotation(
+            text="No notes in this loop",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font={"color": text},
+        )
+    # Match Main's octave-only pitch ticks and unlabeled bar-boundary ticks.
+    ticks = [pitch for pitch in range(minimum, maximum + 1) if pitch % 12 == 0]
+    figure.update_layout(
+        plot_bgcolor=background,
+        paper_bgcolor=background,
+        xaxis={
+            "range": [0, LOOP_SIXTEENTHS],
+            "showgrid": False,
+            "zeroline": False,
+            "tickmode": "array",
+            "tickvals": [0, 16, 32, 48, 64],
+            "ticktext": ["", "", "", "", ""],
+            "fixedrange": False,
+        },
+        yaxis={
+            "range": [minimum - 0.5, maximum + 1.5],
+            "showgrid": False,
+            "zeroline": False,
+            "tickmode": "array",
+            "tickvals": ticks,
+            "ticktext": [_pitch_label(pitch) for pitch in ticks],
+            "tickfont": {"color": text, "size": 10},
+            "fixedrange": False,
+        },
+        showlegend=False,
+        barmode="overlay",
+        dragmode="zoom",
+        margin={"l": 45, "r": 10, "t": 25, "b": 15},
+        height=220,
+        hovermode="closest",
+        hoverdistance=20,
+        modebar={"bgcolor": "rgba(0,0,0,0)", "color": text, "activecolor": "#FF6B5B"},
+    )
+    return figure
+
+
 def _draw(loop: Any, *, width: float, height: float, dpi: int) -> bytes:
     notes = _notes(loop)
     figure = Figure(figsize=(width, height), dpi=dpi, facecolor="#10141d")
@@ -345,4 +473,4 @@ def render_loop(
     return output
 
 
-__all__ = ["render_loop"]
+__all__ = ["build_loop_figure", "render_loop"]

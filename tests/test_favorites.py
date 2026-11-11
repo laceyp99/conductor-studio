@@ -738,3 +738,52 @@ def test_audio_retry_for_a_deleted_session_shows_unavailable(favorites):
     assert view.session_id is None
     assert "no longer available" in view.notice
     assert view.generate_enabled
+
+
+@pytest.mark.parametrize("payload", ['{"bars": []}', "{broken", None])
+def test_saved_roll_in_results_and_favorites(favorites, payload):
+    from conductor_studio.app import _favorites_values
+    from conductor_studio.piano_roll import render_loop
+
+    controller, store, _, manifest = favorites
+    manifest = store.load(manifest.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/piano-roll.png"
+    slot.artifacts.loop = "variants/01/loop.json" if payload is not None else None
+    directory = store.session_dir(manifest.session_id) / "variants/01"
+    render_loop({"bars": []}, directory / "piano-roll.png")
+    if payload is not None:
+        (directory / "loop.json").write_text(payload, encoding="utf-8")
+    store.save(manifest)
+
+    results = controller.reopen(manifest.session_id)
+    favorite = controller.favorites_view(identity(manifest, "01"))
+    result_plot = _view_values(results)[3]
+    favorite_plot = _favorites_values(favorite)[5]
+    assert result_plot.to_json() == favorite_plot.to_json()
+    import gradio as gr
+
+    serialized = gr.Plot().postprocess(result_plot)
+    assert serialized.type == "plotly"
+    if payload == '{"bars": []}':
+        assert any(
+            a.text == "No notes in this loop" for a in result_plot.layout.annotations
+        )
+    else:
+        assert result_plot.data[0].type == "image"
+        assert result_plot.data[0].source.startswith("data:image/png;base64,")
+    assert ("Interactive piano roll unavailable" in results.cards[0].warning) == (
+        payload == "{broken"
+    )
+
+
+def test_piano_roll_components_are_interactive_plots(favorites):
+    controller, _, _, _ = favorites
+    config = build_app(controller).get_config_file()
+    rolls = [
+        component
+        for component in config["components"]
+        if "piano-roll" in component["props"].get("elem_classes", [])
+    ]
+    assert len(rolls) == 5
+    assert all(component["type"] == "plot" for component in rolls)

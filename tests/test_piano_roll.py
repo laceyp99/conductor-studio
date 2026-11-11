@@ -4,7 +4,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from conductor_studio.piano_roll import _notes, _pitch_bounds, render_loop
+from conductor_studio.piano_roll import (
+    _notes,
+    _pitch_bounds,
+    build_loop_figure,
+    render_loop,
+)
 
 
 def _loop_payload(*, notes: list[dict] | None = None) -> dict:
@@ -130,3 +135,63 @@ def test_render_loop_atomically_replaces_existing_output(tmp_path: Path):
     assert rendered == output
     assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert not list(tmp_path.glob(".roll.png.*.tmp"))
+
+
+def test_interactive_roll_uses_full_note_bars_and_normalized_hover():
+    figure = build_loop_figure(
+        _loop_payload(
+            notes=[
+                {
+                    "pitch": "C#",
+                    "octave": 4,
+                    "velocity": 200,
+                    "time": {"start_beat": "sixteen", "duration": "sixty_four"},
+                },
+                {
+                    "pitch": "E",
+                    "octave": 4,
+                    "velocity": 40,
+                    "time": {"start_beat": 1, "duration": 4},
+                },
+                {
+                    "pitch": "invalid",
+                    "octave": 4,
+                    "velocity": 40,
+                    "time": {"start_beat": 1, "duration": 4},
+                },
+            ]
+        )
+    )
+
+    trace = figure.data[0]
+    assert trace.type == "bar"
+    assert trace.orientation == "h"
+    assert list(trace.base) == [15, 0]
+    assert list(trace.x) == [49, 4]
+    assert list(trace.y) == [61, 64]
+    assert "C#4 (MIDI 61)" in trace.hovertext[0]
+    assert "Velocity: 127" in trace.hovertext[0]
+    assert "Bar 1, Beat 4.4" in trace.hovertext[0]
+    assert "49/16 (49 sixteenths)" in trace.hovertext[0]
+    assert trace.marker.color[0] != trace.marker.color[1]
+    assert any(shape.fillcolor == "#252540" for shape in figure.layout.shapes)
+    assert list(figure.layout.xaxis.tickvals) == [0, 16, 32, 48, 64]
+    assert list(figure.layout.xaxis.ticktext) == [""] * 5
+    assert all(pitch % 12 == 0 for pitch in figure.layout.yaxis.tickvals)
+    assert figure.layout.height == 220
+    assert figure.layout.xaxis.fixedrange is False
+    assert figure.layout.yaxis.fixedrange is False
+
+
+def test_interactive_empty_roll_keeps_axes_and_explains_missing_notes():
+    figure = build_loop_figure(_loop_payload())
+
+    assert not figure.data
+    assert list(figure.layout.xaxis.range) == [0, 64]
+    assert any(
+        item.text == "No notes in this loop" for item in figure.layout.annotations
+    )
+    assert (
+        len([item for item in figure.layout.annotations if item.text.startswith("Bar")])
+        == 4
+    )

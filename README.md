@@ -130,6 +130,12 @@ automatically.
    audio** re-renders a missing preview from saved MIDI, for example after
    installing FluidSynth or FFmpeg; it never makes an LLM request.
 
+Piano rolls in results and Favorites support zoom, pan, and note hover showing
+pitch, MIDI number, velocity, bar/beat position, and duration. Pitch-axis labels
+mark C notes only. The interactive view uses saved loop JSON; older sessions
+without readable loop data display their saved PNG instead. The PNG artifact
+is retained, and Plotly also offers image export through its toolbar.
+
 After successful MIDI publication, Studio derives loop JSON and piano-roll
 images and may render up to four MP3 previews. Those jobs are optional: a roll
 or audio failure never invalidates MIDI. Audio-only retry uses the existing

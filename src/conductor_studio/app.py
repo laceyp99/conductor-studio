@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -72,6 +74,7 @@ class CardView:
     favorite_label: str
     audio_retry_visible: bool
     favorite_enabled: bool = False
+    piano_roll: Any = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,33 @@ def _card_view(
     ]
     if unavailable:
         warnings.append(f"Unavailable: {', '.join(unavailable)}.")
+    figure = None
+    if store is not None and slot.artifacts.loop:
+        try:
+            from .piano_roll import build_loop_figure
+
+            loop_path = store.artifact_path(manifest.session_id, slot.artifacts.loop)
+            figure = build_loop_figure(
+                json.loads(loop_path.read_text(encoding="utf-8"))
+            )
+        except (StorageError, OSError, ValueError, TypeError, AttributeError):
+            warnings.append(
+                "Interactive piano roll unavailable; showing saved image if available."
+            )
+    if figure is None and published.get("piano_roll"):
+        with suppress(OSError, ValueError):
+            import plotly.graph_objects as go
+
+            encoded = base64.b64encode(published["piano_roll"].read_bytes()).decode(
+                "ascii"
+            )
+            figure = go.Figure(go.Image(source=f"data:image/png;base64,{encoded}"))
+            figure.update_layout(
+                height=220,
+                margin={"l": 0, "r": 0, "t": 0, "b": 0},
+                xaxis={"visible": False},
+                yaxis={"visible": False},
+            )
     return CardView(
         slot.slot_id,
         f"Variant {int(slot.slot_id)}",
@@ -229,6 +259,7 @@ def _card_view(
         "★ Favorited" if slot.favorite else "☆ Favorite",
         slot.audio_retryable,
         slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
+        figure,
     )
 
 
@@ -736,7 +767,7 @@ def _view_values(view: AppView) -> list[Any]:
                     visible=card.status != "Ready" and card.progress != card.status,
                 ),
                 _update(card.warning, visible=bool(card.warning)),
-                card.image_path,
+                card.piano_roll,
                 card.audio_path,
                 _update(card.midi_path, visible=bool(card.midi_path)),
                 _update(
@@ -788,7 +819,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         tuple(value for _, value in view.choices),
         view.title,
         _update(card.warning if card else "", visible=bool(card and card.warning)),
-        card.image_path if card else None,
+        card.piano_roll if card else None,
         card.audio_path if card else None,
         _update(
             card.midi_path if card else None, visible=bool(card and card.midi_path)
@@ -826,11 +857,7 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         status = gr.Markdown(f"### Variant {int(slot_id)} · Waiting")
         progress = gr.Markdown("Queued")
         warning = gr.Markdown(visible=False)
-        image = gr.Image(
-            type="filepath",
-            interactive=False,
-            buttons=["download", "fullscreen"],
-            height=220,
+        image = gr.Plot(
             label=f"Piano roll for Variant {int(slot_id)}",
             elem_classes=["piano-roll"],
         )
@@ -1058,11 +1085,7 @@ def create_app(
                     with gr.Column(elem_id="favorites-main", scale=3):
                         favorite_title = gr.Markdown("No favorite loops yet.")
                         favorite_warning = gr.Markdown(visible=False)
-                        favorite_image = gr.Image(
-                            type="filepath",
-                            interactive=False,
-                            buttons=["download", "fullscreen"],
-                            height=300,
+                        favorite_image = gr.Plot(
                             label="Favorite piano roll",
                             elem_classes=["piano-roll"],
                         )
