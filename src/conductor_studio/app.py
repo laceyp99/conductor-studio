@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
 from .models import (
@@ -37,7 +38,6 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 #variant-grid { display:grid !important; grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:1rem; align-items:start; }
 #variant-grid > .variant-card { width:100% !important; min-width:0 !important; flex:none !important; }
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
-.piano-roll img { object-fit:contain !important; background:#10141d; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
 .delete-error { display:flex; gap:.8rem; padding:1rem; border:1px solid #d97070; border-left-width:4px; border-radius:10px; background:#351d25; color:#fff0f0; overflow-wrap:anywhere; }
 .delete-error-icon { flex:none; font-size:1.3rem; font-weight:700; }
@@ -208,17 +208,6 @@ def _card_view(
     warnings = [*slot.warnings]
     if slot.audio.failure:
         warnings.append(slot.audio.failure.message)
-    unavailable = [
-        label
-        for kind, label, ref in (
-            ("piano_roll", "piano roll", slot.artifacts.piano_roll),
-            ("audio", "audio preview", slot.artifacts.audio),
-            ("midi", "MIDI", slot.artifacts.midi),
-        )
-        if ref and not published.get(kind)
-    ]
-    if unavailable:
-        warnings.append(f"Unavailable: {', '.join(unavailable)}.")
     figure = None
     if store is not None and slot.artifacts.loop:
         try:
@@ -246,6 +235,17 @@ def _card_view(
                 xaxis={"visible": False},
                 yaxis={"visible": False},
             )
+    unavailable = [
+        label
+        for kind, label, ref in (
+            ("piano_roll", "piano roll", slot.artifacts.piano_roll),
+            ("audio", "audio preview", slot.artifacts.audio),
+            ("midi", "MIDI", slot.artifacts.midi),
+        )
+        if ref and not published.get(kind) and (kind != "piano_roll" or figure is None)
+    ]
+    if unavailable:
+        warnings.append(f"Unavailable: {', '.join(unavailable)}.")
     return CardView(
         slot.slot_id,
         f"Variant {int(slot.slot_id)}",
@@ -756,12 +756,20 @@ def _update(value: Any = _UNSET, **kwargs: Any) -> Any:
     return gr.update(**kwargs)
 
 
+def _png_link(card: CardView | None) -> str:
+    """Link the contained saved PNG through the existing session file route."""
+    if card is None or not card.image_path:
+        return ""
+    url = "/gradio_api/file=" + quote(Path(card.image_path).as_posix(), safe="/:")
+    return f"\n\n[Download saved PNG](<{url}>)"
+
+
 def _view_values(view: AppView) -> list[Any]:
     values: list[Any] = []
     for card in view.cards:
         values.extend(
             [
-                f"### {card.title} · {card.status}",
+                f"### {card.title} · {card.status}{_png_link(card)}",
                 _update(
                     card.progress,
                     visible=card.status != "Ready" and card.progress != card.status,
@@ -817,7 +825,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         _update(choices=list(view.choices), value=view.selection),
         view.selection,
         tuple(value for _, value in view.choices),
-        view.title,
+        view.title + _png_link(card),
         _update(card.warning if card else "", visible=bool(card and card.warning)),
         card.piano_roll if card else None,
         card.audio_path if card else None,

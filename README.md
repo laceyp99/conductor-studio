@@ -134,7 +134,9 @@ Piano rolls in results and Favorites support zoom, pan, and note hover showing
 pitch, MIDI number, velocity, bar/beat position, and duration. Pitch-axis labels
 mark C notes only. The interactive view uses saved loop JSON; older sessions
 without readable loop data display their saved PNG instead. The PNG artifact
-is retained, and Plotly also offers image export through its toolbar.
+is available through **Download saved PNG**, and Plotly also offers image export
+through its toolbar. Use Plotly zoom to inspect notes; the image component's
+previous fullscreen button is no longer offered.
 
 After successful MIDI publication, Studio derives loop JSON and piano-roll
 images and may render up to four MP3 previews. Those jobs are optional: a roll

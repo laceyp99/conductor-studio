@@ -761,6 +761,9 @@ def test_saved_roll_in_results_and_favorites(favorites, payload):
     result_plot = _view_values(results)[3]
     favorite_plot = _favorites_values(favorite)[5]
     assert result_plot.to_json() == favorite_plot.to_json()
+    assert "Download saved PNG" in _view_values(results)[0]
+    assert "Download saved PNG" in _favorites_values(favorite)[3]
+    assert "/gradio_api/file=" in _view_values(results)[0]
     import gradio as gr
 
     serialized = gr.Plot().postprocess(result_plot)
@@ -787,3 +790,20 @@ def test_piano_roll_components_are_interactive_plots(favorites):
     ]
     assert len(rolls) == 5
     assert all(component["type"] == "plot" for component in rolls)
+
+
+def test_missing_png_does_not_warn_when_interactive_roll_is_available(favorites):
+    controller, store, _, manifest = favorites
+    manifest = store.load(manifest.session_id)
+    slot = manifest.slot("01")
+    slot.artifacts.piano_roll = "variants/01/missing.png"
+    slot.artifacts.loop = "variants/01/loop.json"
+    path = store.session_dir(manifest.session_id) / slot.artifacts.loop
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"bars": []}', encoding="utf-8")
+    store.save(manifest)
+
+    view = controller.reopen(manifest.session_id)
+    assert view.cards[0].piano_roll is not None
+    assert "Unavailable: piano roll" not in view.cards[0].warning
+    assert "Download saved PNG" not in _view_values(view)[0]

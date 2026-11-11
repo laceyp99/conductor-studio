@@ -225,7 +225,7 @@ def _pitch_bounds(notes: Sequence[_RenderedNote]) -> tuple[int, int]:
 
 
 def build_loop_figure(loop: Any) -> go.Figure:
-    """Build an interactive four-bar roll from the same notes as PNG exports."""
+    """Build an interactive four-bar roll using the PNG renderer's note normalization."""
     notes = _notes(loop)
     background, black_key, grid, bar_grid, text = (
         "#1a1a2e",
@@ -237,38 +237,47 @@ def build_loop_figure(loop: Any) -> go.Figure:
     minimum = max(MIDI_MIN, min(note.midi for note in notes) - 1) if notes else 48
     maximum = min(MIDI_MAX, max(note.midi for note in notes) + 1) if notes else 72
     figure = go.Figure()
-    for pitch in range(minimum, maximum + 1):
-        if pitch % 12 in {1, 3, 6, 8, 10}:
-            figure.add_shape(
-                type="rect",
-                x0=0,
-                x1=LOOP_SIXTEENTHS,
-                y0=pitch - 0.5,
-                y1=pitch + 0.5,
-                fillcolor=black_key,
-                line={"width": 0},
-                layer="below",
-            )
+    shapes = [
+        {
+            "type": "rect",
+            "x0": 0,
+            "x1": LOOP_SIXTEENTHS,
+            "y0": pitch - 0.5,
+            "y1": pitch + 0.5,
+            "fillcolor": black_key,
+            "line": {"width": 0},
+            "layer": "below",
+        }
+        for pitch in range(minimum, maximum + 1)
+        if pitch % 12 in {1, 3, 6, 8, 10}
+    ]
     for position in range(0, LOOP_SIXTEENTHS + 1, 4):
         is_bar = position % SIXTEENTHS_PER_BAR == 0
-        figure.add_shape(
-            type="line",
-            x0=position,
-            x1=position,
-            y0=minimum - 0.5,
-            y1=maximum + 0.5,
-            line={"color": bar_grid if is_bar else grid, "width": 2 if is_bar else 1},
-            layer="below",
+        shapes.append(
+            {
+                "type": "line",
+                "x0": position,
+                "x1": position,
+                "y0": minimum - 0.5,
+                "y1": maximum + 0.5,
+                "line": {
+                    "color": bar_grid if is_bar else grid,
+                    "width": 2 if is_bar else 1,
+                },
+                "layer": "below",
+            }
         )
-    for bar in range(BAR_COUNT):
-        figure.add_annotation(
-            x=bar * SIXTEENTHS_PER_BAR + 8,
-            y=maximum + 1,
-            text=f"Bar {bar + 1}",
-            showarrow=False,
-            font={"color": text, "size": 12},
-            yanchor="bottom",
-        )
+    annotations = [
+        {
+            "x": bar * SIXTEENTHS_PER_BAR + 8,
+            "y": maximum + 1,
+            "text": f"Bar {bar + 1}",
+            "showarrow": False,
+            "font": {"color": text, "size": 12},
+            "yanchor": "bottom",
+        }
+        for bar in range(BAR_COUNT)
+    ]
     colors, hover = [], []
     duration_labels = {1: "1/16", 2: "1/8", 4: "1/4", 8: "1/2", 16: "1 bar"}
     for note in notes:
@@ -306,17 +315,20 @@ def build_loop_figure(loop: Any) -> go.Figure:
             )
         )
     else:
-        figure.add_annotation(
-            text="No notes in this loop",
-            xref="paper",
-            yref="paper",
-            x=0.5,
-            y=0.5,
-            showarrow=False,
-            font={"color": text},
+        annotations.append(
+            {
+                "text": "No notes in this loop",
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0.5,
+                "y": 0.5,
+                "showarrow": False,
+                "font": {"color": text},
+            }
         )
     # Match Main's octave-only pitch ticks and unlabeled bar-boundary ticks.
     ticks = [pitch for pitch in range(minimum, maximum + 1) if pitch % 12 == 0]
+    # Validate background decorations together, avoiding repeated shape-list rebuilds.
     figure.update_layout(
         plot_bgcolor=background,
         paper_bgcolor=background,
@@ -347,6 +359,8 @@ def build_loop_figure(loop: Any) -> go.Figure:
         hovermode="closest",
         hoverdistance=20,
         modebar={"bgcolor": "rgba(0,0,0,0)", "color": text, "activecolor": "#FF6B5B"},
+        shapes=shapes,
+        annotations=annotations,
     )
     return figure
 
