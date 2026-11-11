@@ -9,7 +9,6 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from .catalog import DEFAULT_PROVIDER, OllamaReadiness
 from .models import (
@@ -38,6 +37,10 @@ body { background:var(--studio-ink); } #studio-shell { max-width:1440px; margin:
 #variant-grid { display:grid !important; grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:1rem; align-items:start; }
 #variant-grid > .variant-card { width:100% !important; min-width:0 !important; flex:none !important; }
 .variant-card { min-width:0 !important; border:1px solid var(--studio-line); border-radius:14px; padding:1rem; background:var(--studio-panel); }
+.piano-roll .modebar { left:2px !important; right:auto !important; top:2px !important; display:flex; flex-direction:column; }
+.piano-roll .modebar-group { display:flex !important; flex-direction:column !important; padding:0 !important; }
+.piano-roll .modebar-btn { width:20px !important; height:20px !important; padding:2px !important; }
+.piano-roll .modebar-btn svg { width:14px; height:14px; }
 .accounting { color:#aeb9ca; font-size:.9rem; } .batch-error { border-left:3px solid #d97070; padding-left:.8rem; }
 .delete-error { display:flex; gap:.8rem; padding:1rem; border:1px solid #d97070; border-left-width:4px; border-radius:10px; background:#351d25; color:#fff0f0; overflow-wrap:anywhere; }
 .delete-error-icon { flex:none; font-size:1.3rem; font-weight:700; }
@@ -66,7 +69,6 @@ class CardView:
     title: str
     status: str
     progress: str
-    image_path: str | None
     audio_path: str | None
     midi_path: str | None
     metadata: str
@@ -142,7 +144,6 @@ def _empty_card(slot_id: str) -> CardView:
         f"Variant {int(slot_id)}",
         "Waiting",
         "Queued",
-        None,
         None,
         None,
         "Parameters will appear here.",
@@ -251,7 +252,6 @@ def _card_view(
         f"Variant {int(slot.slot_id)}",
         status,
         f"{progress.message if progress and progress.message else status}{fraction}",
-        str(published["piano_roll"]) if published.get("piano_roll") else None,
         str(published["audio"]) if published.get("audio") else None,
         str(published["midi"]) if published.get("midi") else None,
         _slot_metadata(manifest),
@@ -756,20 +756,12 @@ def _update(value: Any = _UNSET, **kwargs: Any) -> Any:
     return gr.update(**kwargs)
 
 
-def _png_link(card: CardView | None) -> str:
-    """Link the contained saved PNG through the existing session file route."""
-    if card is None or not card.image_path:
-        return ""
-    url = "/gradio_api/file=" + quote(Path(card.image_path).as_posix(), safe="/:")
-    return f"\n\n[Download saved PNG](<{url}>)"
-
-
 def _view_values(view: AppView) -> list[Any]:
     values: list[Any] = []
     for card in view.cards:
         values.extend(
             [
-                f"### {card.title} · {card.status}{_png_link(card)}",
+                f"### {card.title} · {card.status}",
                 _update(
                     card.progress,
                     visible=card.status != "Ready" and card.progress != card.status,
@@ -825,7 +817,7 @@ def _favorites_values(view: FavoritesView) -> tuple[Any, ...]:
         _update(choices=list(view.choices), value=view.selection),
         view.selection,
         tuple(value for _, value in view.choices),
-        view.title + _png_link(card),
+        view.title,
         _update(card.warning if card else "", visible=bool(card and card.warning)),
         card.piano_roll if card else None,
         card.audio_path if card else None,
@@ -867,6 +859,7 @@ def _build_card(gr: Any, slot_id: str) -> dict[str, Any]:
         warning = gr.Markdown(visible=False)
         image = gr.Plot(
             label=f"Piano roll for Variant {int(slot_id)}",
+            show_label=False,
             elem_classes=["piano-roll"],
         )
         audio = gr.Audio(
@@ -1095,6 +1088,7 @@ def create_app(
                         favorite_warning = gr.Markdown(visible=False)
                         favorite_image = gr.Plot(
                             label="Favorite piano roll",
+                            show_label=False,
                             elem_classes=["piano-roll"],
                         )
                         favorite_audio = gr.Audio(

@@ -209,7 +209,7 @@ def test_media_warnings_match_history_and_favorites_without_hiding_usable_files(
     favorite_card = controller.favorites_view(identity(newer, "01")).card
     assert history_card.warning == favorite_card.warning == f"Unavailable: {label}."
     for media_kind, field in (
-        ("piano_roll", "image_path"),
+        ("piano_roll", "piano_roll"),
         ("audio", "audio_path"),
         ("midi", "midi_path"),
     ):
@@ -629,7 +629,7 @@ def test_deleting_the_displayed_session_clears_results_and_artifacts(favorites):
     app = build_app(controller)
     card = controller.reopen(newer.session_id).cards[0]
     session_dir = store.session_dir(newer.session_id)
-    assert card.image_path
+    assert card.piano_roll is not None
     assert card.audio_path
     assert card.midi_path
     other = controller.reopen(older.session_id).cards[0].midi_path
@@ -761,9 +761,6 @@ def test_saved_roll_in_results_and_favorites(favorites, payload):
     result_plot = _view_values(results)[3]
     favorite_plot = _favorites_values(favorite)[5]
     assert result_plot.to_json() == favorite_plot.to_json()
-    assert "Download saved PNG" in _view_values(results)[0]
-    assert "Download saved PNG" in _favorites_values(favorite)[3]
-    assert "/gradio_api/file=" in _view_values(results)[0]
     import gradio as gr
 
     serialized = gr.Plot().postprocess(result_plot)
@@ -790,6 +787,7 @@ def test_piano_roll_components_are_interactive_plots(favorites):
     ]
     assert len(rolls) == 5
     assert all(component["type"] == "plot" for component in rolls)
+    assert all(component["props"]["show_label"] is False for component in rolls)
 
 
 def test_missing_png_does_not_warn_when_interactive_roll_is_available(favorites):
@@ -806,4 +804,3 @@ def test_missing_png_does_not_warn_when_interactive_roll_is_available(favorites)
     view = controller.reopen(manifest.session_id)
     assert view.cards[0].piano_roll is not None
     assert "Unavailable: piano roll" not in view.cards[0].warning
-    assert "Download saved PNG" not in _view_values(view)[0]
