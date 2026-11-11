@@ -12,7 +12,7 @@ from conductor_studio.catalog import DEFAULT_PROVIDER, ModelCatalog
 
 
 def test_core_public_contract_is_available() -> None:
-    assert version("conductor-core") == "0.12.7"
+    assert version("conductor-core") == "0.12.10"
 
     request_fields = {field.name for field in fields(conductor_core.GenerationRequest)}
     assert {
