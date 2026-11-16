@@ -89,7 +89,7 @@ class StudioService:
         while True:
             try:
                 yield queue.get(timeout=timeout)
-            except Empty:  # noqa: PERF203
+            except Empty:
                 return
 
     def _emit(self, manifest):

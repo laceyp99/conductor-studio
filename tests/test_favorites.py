@@ -1,6 +1,6 @@
 """Offline regression coverage for the individual-loop favorites flow."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 
@@ -32,7 +32,7 @@ def saved_session(store, day, favorite_slots=("01", "03")):
         SessionSettings(prompt=f"Loop set {day}", provider="OpenAI", model="test"),
         core_version="test",
         session_id=f"202610{day:02d}-120000_fixture1",
-        now=datetime(2026, 10, day, 12, tzinfo=timezone.utc),
+        now=datetime(2026, 10, day, 12, tzinfo=UTC),
     )
     manifest.batch.batch_id = "batch"
     manifest.batch.generation_ids = [f"gen-{i}" for i in range(4)]

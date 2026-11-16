@@ -11,7 +11,7 @@ billing, public sharing, or hosted multi-user mode.
 
 ## Prerequisites
 
-- Windows, macOS, or Linux with Python 3.10 or newer.
+- Windows, macOS, or Linux with Python 3.11 or newer.
 - [uv](https://docs.astral.sh/uv/) 0.12.6 or newer.
 - FluidSynth and FFmpeg on `PATH` for optional MP3 previews. MIDI generation
   and downloads do not require the audio toolchain.
@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.12.10 from the immutable commit below, never
+Studio installs Conductor Core v0.14.1 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-586f5220a73461eae7e6ad5aa74fd6d0f21ff83c
+b0e11c69d9e8f07e61cf525696f0cd9849932450
 ```
 
 ## Credentials and controls
@@ -49,8 +49,8 @@ https://github.com/laceyp99/conductor-core.git
 | Ollama host | `OLLAMA_API_HOST_ADDRESS` |
 
 Settings can hold temporary overrides in process memory. Overrides take
-precedence over the environment and disappear at restart; credentials and raw
-provider messages are never persisted.
+precedence over the environment and disappear at restart; credentials are never
+persisted.
 
 Provider and model controls come from Core metadata, never from provider or
 model names. Each model gets at most one way to choose reasoning:
@@ -163,8 +163,15 @@ The filesystem under `~/.conductor/studio/` is authoritative:
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
 serialized, and atomically replaced; the preceding valid manifest is retained
-as `session.previous.json`. Studio has Core write its child and batch records
-without provider messages or absolute paths.
+as `session.previous.json`.
+
+Core keeps the provider conversation for each batch in
+`core/generations/variations/batch_<id>.json`: the system prompt, your prompt,
+the model's reasoning when the provider returns it, and its output. These
+messages never contain credentials. Core records name their files relative to
+the generation folder, so they hold no absolute local paths. Sessions created
+on Core v0.14.0 or older still hold absolute paths under `core/generations/`;
+delete those sessions to remove them.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,

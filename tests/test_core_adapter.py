@@ -112,7 +112,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.12.10", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.14.1", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -182,8 +182,15 @@ def test_symlinked_midi_is_rejected(tmp_path):
         CoreAdapter(tmp_path).normalize_result(result)
 
 
-def test_core_records_omit_provider_messages_and_absolute_paths(tmp_path, monkeypatch):
-    marker = "private-request-marker"
+def test_core_records_keep_provider_messages_without_absolute_paths(
+    tmp_path, monkeypatch
+):
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user prompt"},
+        {"role": "assistant", "content": "reasoning"},
+        {"role": "assistant", "content": "output"},
+    ]
     note = Note(
         pitch="C",
         octave=4,
@@ -202,7 +209,7 @@ def test_core_records_omit_provider_messages_and_absolute_paths(tmp_path, monkey
         lambda **_: routing.VariationProviderResult(
             variations=(loop,) * 4,
             provider="OpenAI",
-            messages=[{"role": "user", "content": marker}],
+            messages=messages,
             usage=None,
             cost=None,
         ),
@@ -215,12 +222,11 @@ def test_core_records_omit_provider_messages_and_absolute_paths(tmp_path, monkey
     records = list(tmp_path.rglob("*.json"))
     assert len(records) == 5
     for record in records:
-        text = record.read_text(encoding="utf-8")
-        assert marker not in text
-        assert tmp_path.name not in text
+        assert tmp_path.name not in record.read_text(encoding="utf-8")
     history = adapter._engine.store.list_variation_history()
     assert history.diagnostics == ()
     assert len(history.records[0].generations) == 4
+    assert list(history.records[0].manifest.messages) == messages
 
 
 def test_provider_error_is_sanitized(tmp_path):

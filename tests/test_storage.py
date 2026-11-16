@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ def make_manifest(session_id="20260829-120000_abcd1234") -> SessionManifest:
         SessionSettings(prompt="fixture", provider="openai", model="test"),
         core_version="0.5.3",
         session_id=session_id,
-        now=datetime(2026, 8, 29, 12, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 29, 12, tzinfo=UTC),
     )
 
 
