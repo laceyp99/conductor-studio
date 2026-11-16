@@ -109,7 +109,7 @@ def test_recovery_interrupts_batch_and_automatic_audio_atomically(tmp_path) -> N
 @pytest.mark.parametrize(
     "batch_directory", ["core/variations", "core/generations/variations"]
 )
-def test_history_favorites_and_trash_moves_complete_session_tree(
+def test_history_favorites_and_delete_removes_complete_session_tree(
     tmp_path, batch_directory
 ) -> None:
     store = SessionStore(tmp_path / "studio")
@@ -130,11 +130,44 @@ def test_history_favorites_and_trash_moves_complete_session_tree(
     assert [(item.session_id, slot) for item, slot in store.favorites()] == [
         (manifest.session_id, "02")
     ]
-    moved = store.move_to_trash(manifest.session_id)
-    assert all((moved / relative).is_file() for relative in expected)
-    assert (moved / "session.json").is_file()
-    assert (moved / "session.previous.json").is_file()
-    assert store.load(manifest.session_id, in_trash=True).terminal
+    store.delete_session(manifest.session_id)
+    assert not session.exists()
+    assert store.history() == []
+    assert not (store.studio_root / "trash").exists()
+
+
+@pytest.mark.parametrize("session_id", ["../outside", "", "C:/outside"])
+def test_delete_rejects_unsafe_session_ids(tmp_path, session_id):
+    store = SessionStore(tmp_path)
+    with pytest.raises(ContainmentError, match="invalid session ID"):
+        store.delete_session(session_id)
+
+
+def test_delete_failure_has_safe_message_and_keeps_session(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path)
+    manifest = make_manifest()
+    complete(manifest)
+    store.create(manifest)
+    session = store.session_dir(manifest.session_id)
+    audio = session / "variants" / "01" / "preview.mp3"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"locked audio")
+    original_unlink = os.unlink
+
+    def fail(path, *args, **kwargs):
+        if str(path).endswith("preview.mp3"):
+            raise PermissionError("sensitive local path")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr("os.unlink", fail)
+    with pytest.raises(StorageError, match=r"^could not delete session$"):
+        store.delete_session(manifest.session_id)
+    assert store.load(manifest.session_id).terminal
+    assert [item.session_id for item in store.history()] == [manifest.session_id]
+    assert audio.is_file()
+    monkeypatch.undo()
+    store.delete_session(manifest.session_id)
+    assert not session.exists()
 
 
 def test_recovery_interrupts_audio_without_invalidating_completed_midi(
@@ -225,18 +258,18 @@ def test_core_generation_midi_rejects_symlink_escape(tmp_path) -> None:
         )
 
 
-def test_cannot_trash_active_session_or_load_invalid_pair(tmp_path) -> None:
+def test_cannot_delete_active_session_or_load_invalid_pair(tmp_path) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
     store.create(manifest)
     with pytest.raises(StorageError):
-        store.move_to_trash(manifest.session_id)
+        store.delete_session(manifest.session_id)
     session = store.session_dir(manifest.session_id)
     complete(manifest)
     manifest.slots[2].audio.state = AudioState.RENDERING
     store.save(manifest)
     with pytest.raises(SessionBusyError, match="rendering audio"):
-        store.move_to_trash(manifest.session_id)
+        store.delete_session(manifest.session_id)
     assert store.load(manifest.session_id).terminal
     (session / "session.json").write_text("bad")
     (session / "session.previous.json").write_text("bad")

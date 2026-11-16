@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -9,19 +10,32 @@ from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import conductor_core
 from conductor_core import GenerationMetadata, playback
 from conductor_core.config import ProviderCredentials
 from conductor_core.storage import FilesystemArtifactStore, GenerationWorkspace
+from pydantic import ValidationError
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
 from .storage import SessionStore
 
+_LOGGER = logging.getLogger(__name__)
 _SECRETS = (
     re.compile(r"(?i)(?:api[_ -]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"\b(?:sk|key|token|ghp|xoxb)[-_][A-Za-z0-9_-]+\b"),
 )
+# Core ValueError text for a model that answered without calling its tool.
+_MISSING_TOOL_CALL = "did not call"
+# Core ValueError text for a model reply that cannot become four variations.
+_MODEL_OUTPUT_ERRORS = ("did not include", "wrong_count")
+# Logged diagnostics must not expose local paths. Quoted text holding a path
+# separator covers subprocess arguments and other quoted paths. An unquoted
+# Windows, network, or POSIX path has no reliable end (spaces, commas, and
+# semicolons are all valid), so it is redacted to the end of its line.
+_QUOTED_PATHS = re.compile(r"""(['"])[^'"]*[\\/][^'"]*\1""")
+_PATHS = re.compile(r"""(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]|(?<![\w:/.\\])/)[^\r\n]*""")
 
 
 @dataclass(frozen=True)
@@ -102,6 +116,18 @@ def ollama_model_status(
     return {"model_capabilities": inspection.capabilities, "error": None}
 
 
+def _path_free(error: BaseException) -> str:
+    """Return error text for logs with local paths replaced by ``[path]``."""
+    if isinstance(error, OSError) and error.strerror:
+        # Build from errno and strerror so no filename can reach the text.
+        text = error.strerror
+        if error.errno is not None:
+            text = f"[Errno {error.errno}] {text}"
+        return f"{text}: [path]" if error.filename is not None else text
+    text = _QUOTED_PATHS.sub(r"\1[path]\1", str(error))
+    return _PATHS.sub("[path]", text)
+
+
 def _safe(value: Any, limit: int = 500) -> str:
     text = str(value) if value is not None else ""
     for pattern in _SECRETS:
@@ -130,7 +156,7 @@ def _failure(error: BaseException) -> AdapterFailure:
             "Lower or turn off thinking, choose a model with a larger context, "
             "or set a larger Ollama context window.",
         )
-    elif any(
+    elif isinstance(error, conductor_core.ProviderError) or any(
         x in name or x in detail
         for x in (
             "credential",
@@ -142,10 +168,31 @@ def _failure(error: BaseException) -> AdapterFailure:
         )
     ):
         category, message = ErrorCategory.PROVIDER, "Provider request failed."
-    elif isinstance(error, (ValueError, TypeError)):
+    elif isinstance(error, ValueError) and _MISSING_TOOL_CALL in detail:
         category, message = (
             ErrorCategory.VALIDATION,
-            "The generation batch was invalid.",
+            "The model did not call the MIDI tool, so no variations were "
+            "returned. Generating again may succeed.",
+        )
+    elif isinstance(error, ValidationError) or (
+        isinstance(error, ValueError) and any(x in detail for x in _MODEL_OUTPUT_ERRORS)
+    ):
+        category, message = (
+            ErrorCategory.VALIDATION,
+            "The model's response did not contain four valid variations. "
+            "Generating again may succeed.",
+        )
+    elif isinstance(error, TypeError):
+        # A TypeError is a Studio, Core, or dependency bug, not a settings problem.
+        category, message = (
+            ErrorCategory.CORE,
+            "Studio or Conductor Core hit an internal error. "
+            "Check the terminal for details.",
+        )
+    elif isinstance(error, ValueError):
+        category, message = (
+            ErrorCategory.VALIDATION,
+            "Conductor Core rejected the generation batch.",
         )
     elif isinstance(error, OSError) or "storage" in name or "file" in name:
         category, message = (
@@ -160,7 +207,7 @@ def _failure(error: BaseException) -> AdapterFailure:
         category, message = ErrorCategory.UNKNOWN, "Generation failed."
     return AdapterFailure(
         FailureInfo(category=category, message=message),
-        f"{type(error).__name__}: {_safe(error, 1000)}",
+        f"{type(error).__name__}: {_safe(_path_free(error), 1000)}",
     )
 
 
@@ -328,7 +375,12 @@ class CoreAdapter:
 
     def normalize_result(self, result: Any) -> NormalizedBatchResult:
         if getattr(result, "status", None) != "complete":
-            raise ValueError("Core returned an incomplete variation batch")
+            diagnostic = getattr(result, "diagnostic", None)
+            raise ValueError(
+                "Core returned an incomplete variation batch: "
+                f"{getattr(diagnostic, 'code', None)}: "
+                f"{getattr(diagnostic, 'message', None)}"
+            )
         metadata, items = result.metadata, tuple(result.items)
         if metadata.requested_count != 4 or metadata.received_count != 4:
             raise ValueError("Core returned the wrong variation count")
@@ -374,6 +426,12 @@ class CoreAdapter:
             # A rejected result still came from a charged request; keep its usage.
             outcome = replace(_failure(error), **_accounting(result))
             self.last_diagnostic = outcome.diagnostic
+            # Log only the redacted diagnostic, never request payloads.
+            _LOGGER.warning(
+                "Generation batch failed (%s): %s",
+                outcome.failure.category.value,
+                outcome.diagnostic,
+            )
             return outcome
 
     def render_audio(self, manifest: SessionManifest, slot_id: str) -> str | None:
@@ -388,10 +446,16 @@ class CoreAdapter:
         ready, message = self.audio_readiness()
         if not ready:
             return self._unavailable(slot, message)
-        output = self.session_root / "variants" / slot_id / "preview.mp3"
-        output.parent.mkdir(parents=True, exist_ok=True)
         slot.audio.state = AudioState.RENDERING
         try:
+            # Never recreate a session that was removed before rendering began.
+            self.session_root.stat()
+            output = (
+                self.session_root / "variants" / slot_id / f"preview-{uuid4().hex}.mp3"
+            )
+            SessionStore._contained(output, self.session_root)
+            output.parent.parent.mkdir(exist_ok=True)
+            output.parent.mkdir(exist_ok=True)
             soundfont = self.default_soundfont_path
             if soundfont is None and hasattr(self.playback, "get_default_soundfont"):
                 soundfont = self.playback.get_default_soundfont()
@@ -402,6 +466,7 @@ class CoreAdapter:
                     str(midi), output_path=str(output), soundfont_name=soundfont
                 )
             ).resolve()
+            SessionStore._contained(output, self.session_root, must_exist=True)
             if rendered != output.resolve() or not rendered.is_file():
                 raise ValueError("audio renderer returned an unsafe path")
             relative = output.relative_to(self.session_root).as_posix()
@@ -414,6 +479,9 @@ class CoreAdapter:
             return relative
         except Exception as error:
             self.last_diagnostic = _failure(error).diagnostic
+            _LOGGER.warning(
+                "Audio rendering failed for slot %s: %s", slot_id, self.last_diagnostic
+            )
             slot.audio.state = AudioState.FAILED
             slot.audio.failure = FailureInfo(
                 category=ErrorCategory.AUDIO,
@@ -427,10 +495,11 @@ class CoreAdapter:
 
     def _contained_file(self, relative: str) -> Path | None:
         try:
-            candidate = (self.session_root / Path(relative)).resolve()
-            candidate.relative_to(self.session_root)
+            candidate = SessionStore._contained(
+                self.session_root / Path(relative), self.session_root, must_exist=True
+            )
             return candidate if candidate.is_file() else None
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             return None
 
     @staticmethod

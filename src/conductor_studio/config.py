@@ -19,9 +19,9 @@ def resolve_studio_root() -> Path:
     return suite_root.resolve() / "studio"
 
 
-def resolve_served_root() -> Path:
-    """Return Studio's dedicated, non-sensitive file-serving directory."""
-    return resolve_studio_root() / "served"
+def resolve_sessions_root() -> Path:
+    """Return the session directory used for storage and direct file serving."""
+    return resolve_studio_root() / "sessions"
 
 
 @dataclass(frozen=True)
@@ -47,23 +47,23 @@ class LaunchConfig:
     def is_loopback(self) -> bool:
         return self.host in {"127.0.0.1", "localhost", "::1"}
 
-    def ensure_served_root(self) -> Path:
+    def ensure_sessions_root(self) -> Path:
         """Create and validate the only directory launch may expose."""
         studio_root = resolve_studio_root()
-        served_root = studio_root / "served"
+        sessions_root = studio_root / "sessions"
         studio_root.mkdir(parents=True, exist_ok=True)
-        if served_root.exists() or served_root.is_symlink():
-            info = served_root.lstat()
+        if sessions_root.exists() or sessions_root.is_symlink():
+            info = sessions_root.lstat()
             if (
                 stat.S_ISLNK(info.st_mode)
                 or getattr(info, "st_file_attributes", 0) & 0x400
             ):
-                raise RuntimeError("served root cannot be a symlink or reparse point")
-            if not served_root.is_dir():
-                raise RuntimeError("served root must be a directory")
+                raise RuntimeError("sessions root cannot be a symlink or reparse point")
+            if not sessions_root.is_dir():
+                raise RuntimeError("sessions root must be a directory")
         else:
-            served_root.mkdir()
-        resolved = served_root.resolve()
+            sessions_root.mkdir()
+        resolved = sessions_root.resolve()
         if resolved.parent != studio_root.resolve():
-            raise RuntimeError("served root must remain directly beneath Studio root")
+            raise RuntimeError("sessions root must remain directly beneath Studio root")
         return resolved

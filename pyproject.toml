@@ -9,9 +9,10 @@ description = "A local-first four-variant comparison studio for Conductor Core"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "conductor-core[playback,providers] @ git+https://github.com/laceyp99/conductor-core.git@8480f09827ac5cf410014076427069e1911b34fe",
+    "conductor-core[providers] @ git+https://github.com/laceyp99/conductor-core.git@586f5220a73461eae7e6ad5aa74fd6d0f21ff83c",
     "gradio==6.26.0",
     "matplotlib>=3.9,<4",
+    "plotly>=6,<7",
     "pydantic>=2.11,<3",
 ]
 
