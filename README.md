@@ -171,14 +171,8 @@ Core keeps the provider conversation for each batch in
 `core/generations/variations/batch_<id>.json`: the system prompt, your prompt,
 the model's reasoning when the provider returns it, and its output. These
 messages never contain credentials. Core records name their files relative to
-the generation folder, so they hold no absolute local paths. Sessions created
-on Core v0.14.0 or older still hold absolute paths under `core/generations/`;
-delete those sessions to remove them.
-
-Core saves each MP3 preview in the variation's generation folder. Sessions
-rendered before Studio adopted Core v0.15.0 keep their earlier
-`variants/<slot>/preview-<render-id>.mp3` files after a re-render, until the
-session is deleted.
+the generation folder, so they hold no absolute local paths. Core also saves
+each MP3 preview in the variation's generation folder.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,
