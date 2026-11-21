@@ -7,9 +7,9 @@ name = "conductor-studio"
 version = "0.1.0"
 description = "A local-first four-variant comparison studio for Conductor Core"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "conductor-core[providers] @ git+https://github.com/laceyp99/conductor-core.git@586f5220a73461eae7e6ad5aa74fd6d0f21ff83c",
+    "conductor-core[providers] @ git+https://github.com/laceyp99/conductor-core.git@92d8964f051dd74e185a90f8f76a1f3016bcb4c4",
     "gradio==6.26.0",
     "matplotlib>=3.9,<4",
     "plotly>=6,<7",
@@ -45,7 +45,7 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 88
 
 [tool.ruff.lint]

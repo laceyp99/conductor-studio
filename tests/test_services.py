@@ -325,39 +325,6 @@ def test_session_cannot_be_deleted_while_audio_retry_renders(tmp_path):
     assert not service.store.session_dir(created.session_id).exists()
 
 
-def test_audio_retry_removes_previous_file_after_persisting_version(tmp_path):
-    service, _ = make_service(tmp_path)
-    created = service.create_session(settings())
-    manifest = service.wait(created.session_id)
-    slot = manifest.slot("01")
-    previous = service.store.artifact_path(created.session_id, slot.artifacts.audio)
-    slot.audio = AudioInfo(
-        state=AudioState.INTERRUPTED,
-        retryable=True,
-        failure=FailureInfo(category=ErrorCategory.INTERRUPTED, message="interrupted"),
-    )
-    service.store.save(manifest)
-
-    class VersionedAdapter(FakeAdapter):
-        def render_audio(self, manifest, slot_id):
-            assert previous.exists()
-            relative = f"variants/{slot_id}/preview-new-version.mp3"
-            (self.root / relative).write_bytes(b"new audio")
-            manifest.slot(slot_id).artifacts.audio = relative
-            manifest.slot(slot_id).audio = AudioInfo(state=AudioState.READY)
-
-    service.adapter_factory = VersionedAdapter
-    service.retry_audio(created.session_id, "01")
-    result = service.wait(created.session_id)
-    assert not previous.exists()
-    assert (
-        service.store.artifact_path(
-            created.session_id, result.slot("01").artifacts.audio
-        ).read_bytes()
-        == b"new audio"
-    )
-
-
 def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     service, adapters = make_service(tmp_path)
     created = service.create_session(settings())

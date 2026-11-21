@@ -4,19 +4,14 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class _ValueEnum(str, Enum):
-    def __str__(self) -> str:
-        return self.value
-
-
-class SlotState(_ValueEnum):
+class SlotState(StrEnum):
     QUEUED = "queued"
     GENERATING = "generating"
     PROCESSING_MIDI = "processing_midi"
@@ -25,12 +20,12 @@ class SlotState(_ValueEnum):
     INTERRUPTED = "interrupted"
 
 
-class MidiState(_ValueEnum):
+class MidiState(StrEnum):
     PENDING = "pending"
     READY = "ready"
 
 
-class AudioState(_ValueEnum):
+class AudioState(StrEnum):
     NOT_ATTEMPTED = "not_attempted"
     RENDERING = "rendering"
     READY = "ready"
@@ -39,7 +34,7 @@ class AudioState(_ValueEnum):
     INTERRUPTED = "interrupted"
 
 
-class SessionStatus(_ValueEnum):
+class SessionStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -47,7 +42,7 @@ class SessionStatus(_ValueEnum):
     INTERRUPTED = "interrupted"
 
 
-class ErrorCategory(_ValueEnum):
+class ErrorCategory(StrEnum):
     VALIDATION = "validation"
     PROVIDER = "provider"
     CORE = "core"
@@ -59,15 +54,11 @@ class ErrorCategory(_ValueEnum):
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _as_utc(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=timezone.utc)
-        if value.tzinfo is None
-        else value.astimezone(timezone.utc)
-    )
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class SessionSettings(BaseModel):

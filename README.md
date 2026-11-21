@@ -11,7 +11,7 @@ billing, public sharing, or hosted multi-user mode.
 
 ## Prerequisites
 
-- Windows, macOS, or Linux with Python 3.10 or newer.
+- Windows, macOS, or Linux with Python 3.11 or newer.
 - [uv](https://docs.astral.sh/uv/) 0.12.6 or newer.
 - FluidSynth and FFmpeg on `PATH` for optional MP3 previews. MIDI generation
   and downloads do not require the audio toolchain.
@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.12.10 from the immutable commit below, never
+Studio installs Conductor Core v0.15.0 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-586f5220a73461eae7e6ad5aa74fd6d0f21ff83c
+92d8964f051dd74e185a90f8f76a1f3016bcb4c4
 ```
 
 ## Credentials and controls
@@ -49,8 +49,8 @@ https://github.com/laceyp99/conductor-core.git
 | Ollama host | `OLLAMA_API_HOST_ADDRESS` |
 
 Settings can hold temporary overrides in process memory. Overrides take
-precedence over the environment and disappear at restart; credentials and raw
-provider messages are never persisted.
+precedence over the environment and disappear at restart; credentials are never
+persisted.
 
 Provider and model controls come from Core metadata, never from provider or
 model names. Each model gets at most one way to choose reasoning:
@@ -153,17 +153,26 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       session.json
       session.previous.json
       core/
-        generations/          # Core child records and MIDI
+        generations/          # Core child records, MIDI, and audio
+          gen_<id>/
+            loop.mid
+            loop-<timestamp>.mp3
           variations/
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png
-        preview-<render-id>.mp3
 ```
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
 serialized, and atomically replaced; the preceding valid manifest is retained
 as `session.previous.json`.
+
+Core keeps the provider conversation for each batch in
+`core/generations/variations/batch_<id>.json`: the system prompt, your prompt,
+the model's reasoning when the provider returns it, and its output. These
+messages never contain credentials. Core records name their files relative to
+the generation folder, so they hold no absolute local paths. Core also saves
+each MP3 preview in the variation's generation folder.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,
@@ -186,8 +195,10 @@ session manifests, Core metadata, and loop JSON. Credentials remain in process
 memory and are never saved there. This is an intentional tradeoff for a private,
 single-user app. Do not expose unauthenticated network mode to the public internet.
 
-Each audio render uses a new filename, and the previous audio file is removed
-after a successful replacement. Deleting a session removes its files, so
+Core saves each audio render under a new filename and removes the previous
+file after the new one is recorded. On Windows, a file another process still
+holds open is removed on the next render instead. Deleting a session removes
+its files, so
 subsequent requests to its URLs are denied. File serving is limited to
 `sessions/`; Gradio cache URLs are blocked.
 Files already downloaded or loaded into a browser cannot be recalled.
@@ -220,7 +231,8 @@ Leave `plan.md`, `decisions.md`, and review/scratch notes uncommitted.
 - Reopen History/Favorites, delete a terminal session, and confirm its directory
   is gone, its displayed cards clear, and copied media URLs are denied.
 - Retry audio and confirm it has a new URL and plays the new render; the old
-  audio URL should no longer work.
+  audio URL should usually stop working (on Windows, an open file is removed on
+  the next render).
 
 Live OpenAI, Anthropic, Gemini, and Ollama checks are opt-in because they require
 credentials and can incur cost. When not explicitly run, their status is
