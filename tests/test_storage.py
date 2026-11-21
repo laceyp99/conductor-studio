@@ -209,7 +209,7 @@ def test_foreign_session_entries_do_not_block_history_or_recovery(tmp_path) -> N
     ]
 
 
-def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:
+def test_core_generation_media_must_be_regular_and_contained(tmp_path) -> None:
     store = SessionStore(tmp_path / "studio")
     manifest = make_manifest()
     store.create(manifest)
@@ -217,12 +217,11 @@ def test_core_generation_midi_must_be_regular_and_contained(tmp_path) -> None:
     midi = session / "core/generations/generation-0/loop.mid"
     midi.parent.mkdir(parents=True)
     midi.write_bytes(b"MIDI")
-    assert (
-        store.artifact_path(
-            manifest.session_id, "core/generations/generation-0/loop.mid"
-        )
-        == midi
-    )
+    audio = midi.with_name("loop-20261121_052351_451614.mp3")
+    audio.write_bytes(b"ID3")
+    for path in (midi, audio):
+        relative = path.relative_to(session).as_posix()
+        assert store.artifact_path(manifest.session_id, relative) == path
     for relative in (
         "../session.json",
         "core/variations/batch/loop.mid",

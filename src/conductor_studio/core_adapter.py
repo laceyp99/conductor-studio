@@ -9,11 +9,11 @@ from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import conductor_core
 from conductor_core import playback
 from conductor_core.config import ProviderCredentials
+from conductor_core.storage import FilesystemArtifactStore
 from pydantic import ValidationError
 
 from .models import AudioState, ErrorCategory, FailureInfo, MidiState, SessionManifest
@@ -242,9 +242,13 @@ class CoreAdapter:
     def core_version() -> str:
         return version("conductor-core")
 
+    @property
+    def core_root(self) -> Path:
+        return self.session_root / "core" / "generations"
+
     def build_engine(self) -> Any:
         config = conductor_core.EngineConfig(
-            artifact_root=self.session_root / "core" / "generations",
+            artifact_root=self.core_root,
             provider_credentials=self.provider_credentials,
             default_soundfont_path=self.default_soundfont_path,
             max_generations=None,
@@ -297,20 +301,21 @@ class CoreAdapter:
             _safe(getattr(event, "message", "")),
         )
 
-    def _midi_reference(self, value: Any) -> str:
+    def _core_reference(self, value: Any, kind: str) -> str:
+        """Return a Core artifact path relative to the session, if contained."""
         raw = Path(str(value))
-        base = (self.session_root / "core" / "generations").resolve()
+        base = self.core_root.resolve()
         unresolved = raw if raw.is_absolute() else base / raw
         if unresolved.is_symlink():
-            raise ValueError("Core returned an unsafe MIDI path")
+            raise ValueError(f"Core returned an unsafe {kind} path")
         candidate = unresolved.resolve()
         try:
             candidate.relative_to(base)
             relative = candidate.relative_to(self.session_root)
         except (OSError, ValueError) as error:
-            raise ValueError("Core returned an unsafe MIDI path") from error
+            raise ValueError(f"Core returned an unsafe {kind} path") from error
         if not candidate.is_file():
-            raise ValueError("Core returned a missing MIDI file")
+            raise ValueError(f"Core returned a missing {kind} file")
         return relative.as_posix()
 
     def normalize_result(self, result: Any) -> NormalizedBatchResult:
@@ -336,7 +341,7 @@ class CoreAdapter:
             NormalizedBatchItem(
                 item.index,
                 ids[item.index],
-                self._midi_reference(item.generation.midi_path),
+                self._core_reference(item.generation.midi_path, "MIDI"),
                 item.loop,
                 tuple(filter(None, (_safe(w) for w in item.warnings))),
             )
@@ -388,28 +393,23 @@ class CoreAdapter:
             return self._unavailable(slot, message)
         slot.audio.state = AudioState.RENDERING
         try:
-            # Never recreate a session that was removed before rendering began.
-            self.session_root.stat()
-            output = (
-                self.session_root / "variants" / slot_id / f"preview-{uuid4().hex}.mp3"
-            )
-            SessionStore._contained(output, self.session_root)
-            output.parent.parent.mkdir(exist_ok=True)
-            output.parent.mkdir(exist_ok=True)
+            generation_id = manifest.batch.generation_ids[int(slot_id) - 1]
             soundfont = self.default_soundfont_path
             if soundfont is None and hasattr(self.playback, "get_default_soundfont"):
                 soundfont = self.playback.get_default_soundfont()
             if hasattr(self.playback, "resolve_soundfont"):
                 soundfont = self.playback.resolve_soundfont(soundfont)
-            rendered = Path(
-                self.playback.midi_to_mp3(
-                    str(midi), output_path=str(output), soundfont_name=soundfont
+            # Core stages, names, and commits the audio, and removes the old file.
+            # Staging fails if the session was deleted, so nothing is recreated.
+            store = FilesystemArtifactStore(self.core_root, max_generations=None)
+            with store.stage_generation_audio(generation_id) as stage:
+                rendered = self.playback.midi_to_mp3(
+                    str(midi), output_path=stage.path, soundfont_name=soundfont
                 )
-            ).resolve()
-            SessionStore._contained(output, self.session_root, must_exist=True)
-            if rendered != output.resolve() or not rendered.is_file():
-                raise ValueError("audio renderer returned an unsafe path")
-            relative = output.relative_to(self.session_root).as_posix()
+                if Path(rendered).resolve() != Path(stage.path).resolve():
+                    raise ValueError("audio renderer returned an unsafe path")
+                metadata = stage.commit(soundfont=soundfont)
+            relative = self._core_reference(metadata.audio_path, "audio")
             slot.artifacts.audio = relative
             slot.audio.state, slot.audio.failure, slot.audio.retryable = (
                 AudioState.READY,

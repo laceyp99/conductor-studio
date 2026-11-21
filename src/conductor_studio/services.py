@@ -27,7 +27,7 @@ from .models import (
     utc_now,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore, StorageError
+from .storage import SessionStore
 from .variation import create_manifest
 
 
@@ -253,7 +253,6 @@ class StudioService:
             target["audio"] = AudioInfo(state=AudioState.RENDERING).model_dump(
                 mode="python"
             )
-            previous_audio = target["artifacts"]["audio"]
             local = self.store.save(SessionManifest.model_validate(data))
         self._emit(local)
         local = local.model_copy(deep=True)
@@ -276,13 +275,6 @@ class StudioService:
             target["audio"] = source.audio.model_dump(mode="python")
             target["artifacts"]["audio"] = source.artifacts.audio
             saved = self.store.save(SessionManifest.model_validate(data))
-            if (
-                previous_audio
-                and source.audio.state is AudioState.READY
-                and source.artifacts.audio != previous_audio
-            ):
-                with suppress(OSError, StorageError):
-                    self.store.artifact_path(session_id, previous_audio).unlink()
         self._emit(saved)
 
     def _run(self, session_id, adapter):

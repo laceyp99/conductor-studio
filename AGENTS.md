@@ -49,11 +49,11 @@
   session directory.
 - Core owns audio storage. Commit rendered audio through Core's staged audio
   commit (`stage_generation_audio`) and do not add Studio-side staging,
-  rollback, or file-replacement logic.
-- Studio's audio has not moved onto that commit yet. Until it does, keep the
-  interim path: a new preview filename under `variants/` per successful render,
-  with the previous file removed, so retries load fresh audio when sessions are
+  rollback, or file-replacement logic. Core names each commit uniquely and
+  removes the replaced file, so retries load fresh audio when sessions are
   served directly.
+- Sessions rendered before that change keep their old `variants/` previews.
+  Leave them in place; deleting the session removes them.
 
 ## Validation
 

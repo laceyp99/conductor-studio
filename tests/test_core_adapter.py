@@ -24,6 +24,7 @@ from conductor_studio.models import (
     AudioState,
     ErrorCategory,
     MidiState,
+    SessionManifest,
     SessionSettings,
 )
 from conductor_studio.variation import create_manifest
@@ -112,7 +113,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.14.3", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.15.0", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -182,15 +183,16 @@ def test_symlinked_midi_is_rejected(tmp_path):
         CoreAdapter(tmp_path).normalize_result(result)
 
 
-def test_core_records_keep_provider_messages_without_absolute_paths(
-    tmp_path, monkeypatch
-):
-    messages = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user prompt"},
-        {"role": "assistant", "content": "reasoning"},
-        {"role": "assistant", "content": "output"},
-    ]
+_MESSAGES = [
+    {"role": "system", "content": "system prompt"},
+    {"role": "user", "content": "user prompt"},
+    {"role": "assistant", "content": "reasoning"},
+    {"role": "assistant", "content": "output"},
+]
+
+
+def _fake_provider(monkeypatch):
+    """Replace only the provider call, so the real Core engine and store run."""
     note = Note(
         pitch="C",
         octave=4,
@@ -209,12 +211,17 @@ def test_core_records_keep_provider_messages_without_absolute_paths(
         lambda **_: routing.VariationProviderResult(
             variations=(loop,) * 4,
             provider="OpenAI",
-            messages=messages,
+            messages=_MESSAGES,
             usage=None,
             cost=None,
         ),
     )
 
+
+def test_core_records_keep_provider_messages_without_absolute_paths(
+    tmp_path, monkeypatch
+):
+    _fake_provider(monkeypatch)
     adapter = CoreAdapter(tmp_path)
     outcome = adapter.generate_batch(_manifest())
 
@@ -226,7 +233,7 @@ def test_core_records_keep_provider_messages_without_absolute_paths(
     history = adapter._engine.store.list_variation_history()
     assert history.diagnostics == ()
     assert len(history.records[0].generations) == 4
-    assert list(history.records[0].manifest.messages) == messages
+    assert list(history.records[0].manifest.messages) == _MESSAGES
 
 
 def test_provider_error_is_sanitized(tmp_path):
@@ -440,10 +447,13 @@ def test_request_sends_context_window_and_thinking_temperature(tmp_path):
     assert (fixed_request.effort, fixed_request.temperature) == ("high", 1.0)
 
 
-def test_audio_only_render_uses_variant_preview(tmp_path):
-    midi = tmp_path / "core" / "generations" / "gen_3" / "loop.mid"
-    midi.parent.mkdir(parents=True)
-    midi.write_bytes(b"MThd")
+def test_audio_render_commits_through_core_with_a_new_name_each_time(
+    tmp_path, monkeypatch
+):
+    _fake_provider(monkeypatch)
+    adapter = CoreAdapter(tmp_path, default_soundfont_path="x.sf2")
+    outcome = adapter.generate_batch(_manifest())
+    assert isinstance(outcome, NormalizedBatchResult), adapter.last_diagnostic
 
     class Playback:
         @staticmethod
@@ -455,19 +465,33 @@ def test_audio_only_render_uses_variant_preview(tmp_path):
             Path(output_path).write_bytes(b"ID3")
             return output_path
 
-    manifest = _manifest()
-    slot = manifest.slot("04")
-    slot.midi, slot.artifacts.midi = MidiState.READY, "core/generations/gen_3/loop.mid"
-    adapter = CoreAdapter(
-        tmp_path, playback_factory=Playback, default_soundfont_path="x.sf2"
+    adapter.playback = Playback
+    data = _manifest().model_dump(mode="python")
+    data["batch"].update(
+        batch_id=outcome.batch_id, generation_ids=list(outcome.generation_ids)
     )
+    for slot_data, item in zip(data["slots"], outcome.items, strict=True):
+        slot_data.update(state="succeeded", midi="ready")
+        slot_data["artifacts"]["midi"] = item.midi_path
+    data["status"] = "completed"
+    manifest = SessionManifest.model_validate(data)
+    slot = manifest.slot("04")
+
     first = adapter.render_audio(manifest, "04")
     second = adapter.render_audio(manifest, "04")
-    assert first.startswith("variants/04/preview-")
-    assert first.endswith(".mp3")
+
+    generation = (tmp_path / outcome.items[3].midi_path).parent
+    assert first is not None, adapter.last_diagnostic
+    assert second is not None, adapter.last_diagnostic
     assert first != second
+    assert (tmp_path / second).parent == generation
+    assert not (tmp_path / first).exists()
+    assert [path.name for path in generation.glob("*.mp3")] == [Path(second).name]
     assert slot.artifacts.audio == second
     assert slot.audio.state is AudioState.READY
+    record = adapter._engine.store.get_generation(outcome.generation_ids[3])
+    assert Path(record.audio_path).name == Path(second).name
+    assert record.soundfont == "x.sf2"
 
 
 def test_audio_readiness_prevents_render(tmp_path):

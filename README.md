@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.14.3 from the immutable commit below, never
+Studio installs Conductor Core v0.15.0 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-98d080eb94cdd299e4f2eb19a37fb21531b4ea9c
+92d8964f051dd74e185a90f8f76a1f3016bcb4c4
 ```
 
 ## Credentials and controls
@@ -153,12 +153,14 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       session.json
       session.previous.json
       core/
-        generations/          # Core child records and MIDI
+        generations/          # Core child records, MIDI, and audio
+          gen_<id>/
+            loop.mid
+            loop-<timestamp>.mp3
           variations/
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png
-        preview-<render-id>.mp3
 ```
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
@@ -172,6 +174,11 @@ messages never contain credentials. Core records name their files relative to
 the generation folder, so they hold no absolute local paths. Sessions created
 on Core v0.14.0 or older still hold absolute paths under `core/generations/`;
 delete those sessions to remove them.
+
+Core saves each MP3 preview in the variation's generation folder. Sessions
+rendered before Studio adopted Core v0.15.0 keep their earlier
+`variants/<slot>/preview-<render-id>.mp3` files after a re-render, until the
+session is deleted.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,
@@ -194,8 +201,10 @@ session manifests, Core metadata, and loop JSON. Credentials remain in process
 memory and are never saved there. This is an intentional tradeoff for a private,
 single-user app. Do not expose unauthenticated network mode to the public internet.
 
-Each audio render uses a new filename, and the previous audio file is removed
-after a successful replacement. Deleting a session removes its files, so
+Core saves each audio render under a new filename and removes the previous
+file after the new one is recorded. On Windows, a file another process still
+holds open is removed on the next render instead. Deleting a session removes
+its files, so
 subsequent requests to its URLs are denied. File serving is limited to
 `sessions/`; Gradio cache URLs are blocked.
 Files already downloaded or loaded into a browser cannot be recalled.
@@ -228,7 +237,8 @@ Leave `plan.md`, `decisions.md`, and review/scratch notes uncommitted.
 - Reopen History/Favorites, delete a terminal session, and confirm its directory
   is gone, its displayed cards clear, and copied media URLs are denied.
 - Retry audio and confirm it has a new URL and plays the new render; the old
-  audio URL should no longer work.
+  audio URL should usually stop working (on Windows, an open file is removed on
+  the next render).
 
 Live OpenAI, Anthropic, Gemini, and Ollama checks are opt-in because they require
 credentials and can incur cost. When not explicitly run, their status is

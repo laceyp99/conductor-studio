@@ -338,10 +338,10 @@ class SessionStore:
         if parsed.parts[0] == "core" and (
             len(parsed.parts) < 4
             or parsed.parts[:2] != ("core", "generations")
-            or parsed.suffix.lower() not in {".mid", ".midi"}
+            or parsed.suffix.lower() not in {".mid", ".midi", ".mp3"}
         ):
             raise ContainmentError(
-                "only Core generation MIDI artifacts may be referenced"
+                "only Core generation MIDI and audio artifacts may be referenced"
             )
         session_dir = self._session_dir(session_id, must_exist=True)
         candidate = session_dir.joinpath(*parsed.parts)
