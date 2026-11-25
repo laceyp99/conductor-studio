@@ -21,11 +21,16 @@
 
 ## Secrets and local serving
 
-- Never persist credentials, provider request payloads, or arbitrary local
-  paths. Credential overrides are process-memory only.
+- Never persist credentials or arbitrary local paths. Credential overrides are
+  process-memory only.
+- Core stores each batch's provider messages (system, user, reasoning, and
+  output) in its batch record under the session. Keep them; do not strip or
+  copy them elsewhere, and never log them.
 - Keep session manifests authoritative under the configured Studio root.
-- Serve files only from the dedicated `served/` directory; block `sessions/`
-  and `trash/` from Gradio file serving.
+- Serve artifacts directly from `sessions/` using Gradio static paths, without
+  publication copies. This intentionally exposes session manifests, metadata,
+  and stored provider messages to clients of the private app. Limit file serving to `sessions/` and block
+  Gradio cache paths. Never persist credentials in session records.
 - Keep Gradio sharing disabled and default to loopback.
   For authorized remote previews, bind to the server host's Tailscale IP using
   `--host <tailscale-ip> --allow-network`. Keep the no-authentication warning
@@ -39,8 +44,16 @@
 - Do not automatically retry interrupted or failed provider calls.
 - Treat MIDI success independently from optional audio rendering. Audio retry
   must not issue another LLM request.
-- Move deleted terminal sessions to managed Trash; do not permanently delete
-  creative artifacts in the MVP.
+- Permanently delete terminal sessions on explicit user action. Refuse deletion
+  during generation or audio rendering. Keep session artifacts beneath their
+  session directory.
+- Core owns audio storage. Commit rendered audio through Core's staged audio
+  commit (`stage_generation_audio`) and do not add Studio-side staging,
+  rollback, or file-replacement logic. Core names each commit uniquely and
+  removes the replaced file, so retries load fresh audio when sessions are
+  served directly.
+- Sessions rendered before that change keep their old `variants/` previews.
+  Leave them in place; deleting the session removes them.
 
 ## Validation
 

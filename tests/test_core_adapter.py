@@ -1,4 +1,6 @@
+import logging
 from pathlib import Path
+from subprocess import CalledProcessError
 from types import SimpleNamespace
 
 import pytest
@@ -6,7 +8,11 @@ from conductor_core import (
     ProgressEvent,
     ProviderContextLengthError,
     ProviderCredentials,
+    ProviderRequestError,
+    routing,
 )
+from conductor_core.models import Bar, Loop, Note, TimeInformation
+from pydantic import BaseModel, ValidationError
 
 from conductor_studio.core_adapter import (
     AdapterFailure,
@@ -18,6 +24,7 @@ from conductor_studio.models import (
     AudioState,
     ErrorCategory,
     MidiState,
+    SessionManifest,
     SessionSettings,
 )
 from conductor_studio.variation import create_manifest
@@ -106,7 +113,7 @@ def test_batch_request_engine_config_progress_and_accounting(tmp_path):
     assert outcome.generation_ids == ("gen-0", "gen-1", "gen-2", "gen-3")
     assert outcome.items[0].midi_path == "core/generations/gen_0/loop.mid"
     assert outcome.items[0].warnings == ("warning 0",)
-    assert (outcome.core_version, outcome.total_cost) == ("0.10.0", 0.12)
+    assert (outcome.core_version, outcome.total_cost) == ("0.15.0", 0.12)
     assert (outcome.input_tokens, outcome.output_tokens, outcome.total_tokens) == (
         10,
         20,
@@ -176,6 +183,59 @@ def test_symlinked_midi_is_rejected(tmp_path):
         CoreAdapter(tmp_path).normalize_result(result)
 
 
+_MESSAGES = [
+    {"role": "system", "content": "system prompt"},
+    {"role": "user", "content": "user prompt"},
+    {"role": "assistant", "content": "reasoning"},
+    {"role": "assistant", "content": "output"},
+]
+
+
+def _fake_provider(monkeypatch):
+    """Replace only the provider call, so the real Core engine and store run."""
+    note = Note(
+        pitch="C",
+        octave=4,
+        velocity=90,
+        time=TimeInformation(start_beat=1, duration=4),
+    )
+    loop = Loop(
+        Bar_1=Bar(num=1, notes=[note]),
+        Bar_2=Bar(num=2, notes=[]),
+        Bar_3=Bar(num=3, notes=[]),
+        Bar_4=Bar(num=4, notes=[]),
+    )
+    monkeypatch.setattr(
+        routing,
+        "generate_variations",
+        lambda **_: routing.VariationProviderResult(
+            variations=(loop,) * 4,
+            provider="OpenAI",
+            messages=_MESSAGES,
+            usage=None,
+            cost=None,
+        ),
+    )
+
+
+def test_core_records_keep_provider_messages_without_absolute_paths(
+    tmp_path, monkeypatch
+):
+    _fake_provider(monkeypatch)
+    adapter = CoreAdapter(tmp_path)
+    outcome = adapter.generate_batch(_manifest())
+
+    assert isinstance(outcome, NormalizedBatchResult), adapter.last_diagnostic
+    records = list(tmp_path.rglob("*.json"))
+    assert len(records) == 5
+    for record in records:
+        assert tmp_path.name not in record.read_text(encoding="utf-8")
+    history = adapter._engine.store.list_variation_history()
+    assert history.diagnostics == ()
+    assert len(history.records[0].generations) == 4
+    assert list(history.records[0].manifest.messages) == _MESSAGES
+
+
 def test_provider_error_is_sanitized(tmp_path):
     class Engine:
         def __init__(self, config):
@@ -206,6 +266,150 @@ def test_context_length_error_explains_how_to_recover(tmp_path):
     assert outcome.failure.category is ErrorCategory.PROVIDER
     assert "ran out of context" in outcome.failure.message
     assert "Ollama context window" in outcome.failure.message
+
+
+def _model_validation_error():
+    class Loop(BaseModel):
+        bars: int
+
+    try:
+        Loop.model_validate_json('{"bars": "many"}')
+    except ValidationError as error:
+        return error
+    raise AssertionError("expected a validation error")
+
+
+@pytest.mark.parametrize(
+    ("error", "category", "message"),
+    [
+        (
+            ValueError("Model m did not call the build_MIDI_variations tool."),
+            ErrorCategory.VALIDATION,
+            "did not call the MIDI tool",
+        ),
+        (
+            _model_validation_error(),
+            ErrorCategory.VALIDATION,
+            "did not contain four valid variations",
+        ),
+        (
+            TypeError("unexpected keyword argument 'betas'"),
+            ErrorCategory.CORE,
+            "Studio or Conductor Core hit an internal error",
+        ),
+        (
+            ProviderRequestError("Anthropic", "overloaded", operation="request"),
+            ErrorCategory.PROVIDER,
+            "Provider request failed",
+        ),
+        (
+            ValueError("Unsupported OpenAI reasoning effort: max"),
+            ErrorCategory.VALIDATION,
+            "Conductor Core rejected",
+        ),
+    ],
+)
+def test_batch_failures_are_specific_and_logged(
+    tmp_path, caplog, error, category, message
+):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise error
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert isinstance(outcome, AdapterFailure)
+    assert outcome.failure.category is category
+    assert message in outcome.failure.message
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Generation batch failed ({category.value}): {outcome.diagnostic}"
+    ]
+
+
+_LOCAL_PATHS = (
+    r"C:\Users\pat\studio\gen.mid",
+    "/home/pat/gen.mid",
+    "/home/pat/My Music/gen.mid",
+    r"C:\Users\Pat Lacey\studio\gen.mid",
+    r"C:\Users\Lacey, Pat\studio\gen.mid",
+    "/home/pat/a;b/gen.mid",
+    r"\\nas\music\studio\gen.mid",
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "diagnostic"),
+    [
+        *(
+            (
+                PermissionError(13, "Permission denied", path),
+                "PermissionError: [Errno 13] Permission denied: [path]",
+            )
+            for path in _LOCAL_PATHS
+        ),
+        # Core's playback error carries the path unquoted.
+        *(
+            (
+                FileNotFoundError(f"MIDI file not found: {path}"),
+                "FileNotFoundError: MIDI file not found: [path]",
+            )
+            for path in _LOCAL_PATHS
+        ),
+        (
+            CalledProcessError(
+                1,
+                [
+                    "fluidsynth",
+                    r"C:\Program Files\GM.sf2",
+                    "/home/pat/My Music/gen.mid",
+                ],
+            ),
+            "CalledProcessError: Command '['fluidsynth', '[path]', '[path]']' "
+            "returned non-zero exit status 1.",
+        ),
+    ],
+)
+def test_logged_diagnostic_omits_local_paths(tmp_path, caplog, error, diagnostic):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            raise error
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert outcome.diagnostic == diagnostic
+    assert "gen.mid" not in caplog.text
+
+
+def test_wrong_count_failure_logs_core_diagnostic_without_secrets(tmp_path, caplog):
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def generate_variations(self, request, progress_callback):
+            result = _result(Path(tmp_path), indexes=(), received=3, status="failed")
+            result.diagnostic = SimpleNamespace(
+                code="wrong_count",
+                message="Provider returned 3 variations; expected 4. api_key=sk-x1",
+            )
+            return result
+
+    with caplog.at_level(logging.WARNING, logger="conductor_studio"):
+        outcome = CoreAdapter(tmp_path, engine_factory=Engine).generate_batch(
+            _manifest()
+        )
+    assert "did not contain four valid variations" in outcome.failure.message
+    assert "Provider returned 3 variations" in caplog.text
+    assert "sk-x1" not in caplog.text
 
 
 def test_request_sends_context_window_and_thinking_temperature(tmp_path):
@@ -243,10 +447,13 @@ def test_request_sends_context_window_and_thinking_temperature(tmp_path):
     assert (fixed_request.effort, fixed_request.temperature) == ("high", 1.0)
 
 
-def test_audio_only_render_uses_variant_preview(tmp_path):
-    midi = tmp_path / "core" / "generations" / "gen_3" / "loop.mid"
-    midi.parent.mkdir(parents=True)
-    midi.write_bytes(b"MThd")
+def test_audio_render_commits_through_core_with_a_new_name_each_time(
+    tmp_path, monkeypatch
+):
+    _fake_provider(monkeypatch)
+    adapter = CoreAdapter(tmp_path, default_soundfont_path="x.sf2")
+    outcome = adapter.generate_batch(_manifest())
+    assert isinstance(outcome, NormalizedBatchResult), adapter.last_diagnostic
 
     class Playback:
         @staticmethod
@@ -258,14 +465,33 @@ def test_audio_only_render_uses_variant_preview(tmp_path):
             Path(output_path).write_bytes(b"ID3")
             return output_path
 
-    manifest = _manifest()
-    slot = manifest.slot("04")
-    slot.midi, slot.artifacts.midi = MidiState.READY, "core/generations/gen_3/loop.mid"
-    adapter = CoreAdapter(
-        tmp_path, playback_factory=Playback, default_soundfont_path="x.sf2"
+    adapter.playback = Playback
+    data = _manifest().model_dump(mode="python")
+    data["batch"].update(
+        batch_id=outcome.batch_id, generation_ids=list(outcome.generation_ids)
     )
-    assert adapter.render_audio(manifest, "04") == "variants/04/preview.mp3"
+    for slot_data, item in zip(data["slots"], outcome.items, strict=True):
+        slot_data.update(state="succeeded", midi="ready")
+        slot_data["artifacts"]["midi"] = item.midi_path
+    data["status"] = "completed"
+    manifest = SessionManifest.model_validate(data)
+    slot = manifest.slot("04")
+
+    first = adapter.render_audio(manifest, "04")
+    second = adapter.render_audio(manifest, "04")
+
+    generation = (tmp_path / outcome.items[3].midi_path).parent
+    assert first is not None, adapter.last_diagnostic
+    assert second is not None, adapter.last_diagnostic
+    assert first != second
+    assert (tmp_path / second).parent == generation
+    assert not (tmp_path / first).exists()
+    assert [path.name for path in generation.glob("*.mp3")] == [Path(second).name]
+    assert slot.artifacts.audio == second
     assert slot.audio.state is AudioState.READY
+    record = adapter._engine.store.get_generation(outcome.generation_ids[3])
+    assert Path(record.audio_path).name == Path(second).name
+    assert record.soundfont == "x.sf2"
 
 
 def test_audio_readiness_prevents_render(tmp_path):

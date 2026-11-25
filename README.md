@@ -11,7 +11,7 @@ billing, public sharing, or hosted multi-user mode.
 
 ## Prerequisites
 
-- Windows, macOS, or Linux with Python 3.10 or newer.
+- Windows, macOS, or Linux with Python 3.11 or newer.
 - [uv](https://docs.astral.sh/uv/) 0.12.6 or newer.
 - FluidSynth and FFmpeg on `PATH` for optional MP3 previews. MIDI generation
   and downloads do not require the audio toolchain.
@@ -31,12 +31,12 @@ is an explicit, unauthenticated opt-in:
 uv run conductor-studio --host 0.0.0.0 --port 7860 --allow-network
 ```
 
-Studio installs Conductor Core v0.10.0 from the immutable commit below, never
+Studio installs Conductor Core v0.15.0 from the immutable commit below, never
 from a sibling checkout or mutable branch:
 
 ```text
 https://github.com/laceyp99/conductor-core.git
-8480f09827ac5cf410014076427069e1911b34fe
+92d8964f051dd74e185a90f8f76a1f3016bcb4c4
 ```
 
 ## Credentials and controls
@@ -49,8 +49,8 @@ https://github.com/laceyp99/conductor-core.git
 | Ollama host | `OLLAMA_API_HOST_ADDRESS` |
 
 Settings can hold temporary overrides in process memory. Overrides take
-precedence over the environment and disappear at restart; credentials and raw
-provider messages are never persisted.
+precedence over the environment and disappear at restart; credentials are never
+persisted.
 
 Provider and model controls come from Core metadata, never from provider or
 model names. Each model gets at most one way to choose reasoning:
@@ -125,14 +125,24 @@ automatically.
    starring and unstarring update the collection immediately. Use **Open
    source session** to see its original four variations in History.
    Changing loops stops playback; audio never starts automatically. Missing
-   files remain listed with a warning, and can still be unfavorited.
+   files remain listed with a warning, and can still be unfavorited. After
+   restoring a file, **Refresh media** rechecks the selected loop. **Retry
+   audio** re-renders a missing preview from saved MIDI, for example after
+   installing FluidSynth or FFmpeg; it never makes an LLM request.
+
+Piano rolls in results and Favorites support zoom, pan, and note hover showing
+pitch, MIDI number, velocity, bar/beat position, and duration. Pitch-axis labels
+mark C notes only. The interactive view uses saved loop JSON; older sessions
+without readable loop data display their saved PNG instead. Use Plotly's camera
+button to download an image of the current view. Use Plotly zoom to inspect notes; the image component's
+previous fullscreen button is no longer offered.
 
 After successful MIDI publication, Studio derives loop JSON and piano-roll
 images and may render up to four MP3 previews. Those jobs are optional: a roll
 or audio failure never invalidates MIDI. Audio-only retry uses the existing
 contained MIDI and never makes an LLM request.
 
-## Data, recovery, and Trash
+## Data, recovery, and deletion
 
 The filesystem under `~/.conductor/studio/` is authoritative:
 
@@ -143,19 +153,26 @@ The filesystem under `~/.conductor/studio/` is authoritative:
       session.json
       session.previous.json
       core/
-        generations/          # Core child records and MIDI
+        generations/          # Core child records, MIDI, and audio
+          gen_<id>/
+            loop.mid
+            loop-<timestamp>.mp3
           variations/
       variants/01/ ... variants/04/
         loop.json
         piano-roll.png
-        preview.mp3
-  served/                     # copied, approved media only
-  trash/                      # complete recoverable session folders
 ```
 
 `CONDUCTOR_HOME` moves the suite root. Every manifest mutation is validated,
 serialized, and atomically replaced; the preceding valid manifest is retained
 as `session.previous.json`.
+
+Core keeps the provider conversation for each batch in
+`core/generations/variations/batch_<id>.json`: the system prompt, your prompt,
+the model's reasoning when the provider returns it, and its output. These
+messages never contain credentials. Core records name their files relative to
+the generation folder, so they hold no absolute local paths. Core also saves
+each MP3 preview in the variation's generation folder.
 
 At startup, a nonterminal batch is marked interrupted with a sanitized failure,
 including any in-progress automatic audio. Studio does not inspect Core history,
@@ -164,18 +181,27 @@ but before Studio publishes the batch can therefore leave unreferenced Core
 records under that session; a later new session may incur another provider
 charge.
 
-Deleting a terminal session moves its whole directory to managed Trash in one
-operation. Its manifests, backups, Core records in either layout, and derived
-variants stay together. Restore by moving the complete directory back; do not
-copy individual Core files.
+**Delete session permanently** removes the complete session directory, including
+all four variants, favorites, manifests, backups, and Core records. It cannot
+be undone. Deletion is refused while that session is generating or rendering
+audio. A filesystem error can leave a partial directory; Studio reports the
+failure.
 
 ## Security boundary
 
-Only regular, contained media is copied into `served/`: Core generation MIDI
-(`.mid`/`.midi`) and Studio-derived audio or images (`.mp3`/`.png`). Session
-manifests, Core metadata, variation records, provider messages, loop JSON, and
-anything beneath Trash are never served directly. Do not expose the
-unauthenticated network mode to the public internet.
+Gradio serves `sessions/` directly without cache copies. Anyone who can reach
+Studio can fetch files in that directory, including prompts, model settings,
+session manifests, Core metadata, and loop JSON. Credentials remain in process
+memory and are never saved there. This is an intentional tradeoff for a private,
+single-user app. Do not expose unauthenticated network mode to the public internet.
+
+Core saves each audio render under a new filename and removes the previous
+file after the new one is recorded. On Windows, a file another process still
+holds open is removed on the next render instead. Deleting a session removes
+its files, so
+subsequent requests to its URLs are denied. File serving is limited to
+`sessions/`; Gradio cache URLs are blocked.
+Files already downloaded or loaded into a browser cannot be recalled.
 
 ## Developer checks
 
@@ -202,8 +228,11 @@ Leave `plan.md`, `decisions.md`, and review/scratch notes uncommitted.
   without provider activity.
 - Terminate during generation, restart, and verify interruption without Core
   reconstruction or retry.
-- Reopen History/Favorites, move a terminal session to Trash, and confirm the
-  complete Core and variant trees moved while `served/` contains media only.
+- Reopen History/Favorites, delete a terminal session, and confirm its directory
+  is gone, its displayed cards clear, and copied media URLs are denied.
+- Retry audio and confirm it has a new URL and plays the new render; the old
+  audio URL should usually stop working (on Windows, an open file is removed on
+  the next render).
 
 Live OpenAI, Anthropic, Gemini, and Ollama checks are opt-in because they require
 credentials and can incur cost. When not explicitly run, their status is
@@ -213,5 +242,5 @@ unverified rather than passed or failed.
 
 Studio intentionally omits variable batch sizes, provider-generation retry,
 automatic recovery, cancellation, in-app MIDI editing, user SoundFont
-management, search/tags/import/export, permanent deletion, accounts,
+management, search/tags/import/export, Trash/restore, accounts,
 authentication, public sessions, billing, and hosted multi-user isolation.

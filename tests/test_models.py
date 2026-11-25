@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -16,7 +16,7 @@ from conductor_studio.models import (
     SlotState,
 )
 
-NOW = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 
 
 def settings(**changes):

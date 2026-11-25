@@ -20,7 +20,6 @@ from .models import (
     AudioState,
     ErrorCategory,
     FailureInfo,
-    MidiState,
     Progress,
     SessionManifest,
     SessionSettings,
@@ -76,9 +75,10 @@ class StudioService:
         self.max_audio_workers = max_workers
         self._state_lock = threading.RLock()
         self._coordinator_lock = threading.RLock()
+        # Per-run state, keyed by session and removed by the worker when the
+        # run ends, so abandoned UI streams leave nothing behind.
         self._active_session_id = None
         self._executors = {}
-        self._futures = {}
         self._callbacks = {}
         self._events = {}
 
@@ -91,16 +91,15 @@ class StudioService:
     def generation_active(self):
         return self.active_session_id is not None
 
-    def subscribe(self, session_id, callback):
-        with self._state_lock:
-            self._callbacks.setdefault(session_id, []).append(callback)
-
     def events(self, session_id, *, timeout=None):
-        queue = self._events.setdefault(session_id, Queue())
+        """Yield the active run's events until none arrive within `timeout`."""
+        queue = self._events.get(session_id)
+        if queue is None:
+            return
         while True:
             try:
                 yield queue.get(timeout=timeout)
-            except Empty:  # noqa: PERF203
+            except Empty:
                 return
 
     def _emit(self, manifest):
@@ -112,8 +111,9 @@ class StudioService:
                 slot.progress,
                 manifest.model_copy(deep=True),
             )
-            self._events.setdefault(manifest.session_id, Queue()).put(event)
-            for callback in tuple(self._callbacks.get(manifest.session_id, ())):
+            if queue := self._events.get(manifest.session_id):
+                queue.put(event)
+            if callback := self._callbacks.get(manifest.session_id):
                 with suppress(Exception):  # UI observers are isolated
                     callback(event)
 
@@ -263,39 +263,46 @@ class StudioService:
                     lambda slot: slot["warnings"].append(DERIVED_WARNING),
                 )
 
-    def _update_slot(self, session_id, index, change):
+    def _update_slot(self, session_id, index, mutate):
         """Apply one slot mutation to the latest manifest and persist it."""
         with self._coordinator_lock:
-            data = self.store.load(session_id).model_dump(mode="python")
-            change(data["slots"][index])
-            return self.store.save(SessionManifest.model_validate(data))
+            current = self.store.load(session_id)
+
+            def change(data):
+                mutate(data["slots"][index])
+
+            return self.store.save(self._changed(current, change))
 
     def _audio(self, session_id, slot_id, adapter):
         """Render one slot's audio; any failure leaves a retryable state."""
         index = int(slot_id) - 1
+        rendered = None  # the slot as the renderer left it, once known
 
-        def publish(audio, path):
+        def publish(audio, artifacts=None):
+            # Without artifacts the saved audio reference is left as is, so a
+            # re-render keeps the previous audio until Core commits new audio.
             def change(slot):
                 slot["audio"] = audio.model_dump(mode="python")
-                slot["artifacts"]["audio"] = path
+                if artifacts is not None:
+                    slot["artifacts"]["audio"] = artifacts.audio
 
             saved = self._update_slot(session_id, index, change)
             self._emit(saved)
             return saved
 
         try:
-            local = publish(AudioInfo(state=AudioState.RENDERING), None)
+            local = publish(AudioInfo(state=AudioState.RENDERING))
             local = local.model_copy(deep=True)
             try:
                 adapter.render_audio(local, slot_id)
             except Exception:
                 local.slot(slot_id).audio = AUDIO_FAILURE.model_copy()
-            source = local.slot(slot_id)
-            publish(source.audio, source.artifacts.audio)
+            rendered = local.slot(slot_id)
+            publish(rendered.audio, rendered.artifacts)
         except Exception:
             # A storage fault must not strand the slot as rendering or untried.
             with suppress(Exception):
-                publish(AUDIO_FAILURE, None)
+                publish(AUDIO_FAILURE, rendered and rendered.artifacts)
 
     def _generate(self, session_id, adapter):
         """Run the one provider batch; return the published result or None."""
@@ -335,25 +342,47 @@ class StudioService:
             return None
 
     def _run(self, session_id, adapter):
-        try:
-            outcome = self._generate(session_id, adapter)
-            if outcome is None:
-                return
-            # MIDI is published. Optional jobs record failures per slot and
-            # must never rewrite the batch as a generation failure.
-            for item in outcome.items:
-                self._derived(session_id, item)
-            with ThreadPoolExecutor(
-                max_workers=self.max_audio_workers, thread_name_prefix="studio-audio"
-            ) as pool:
-                for item in outcome.items:
-                    pool.submit(
-                        self._audio, session_id, f"{item.index + 1:02d}", adapter
-                    )
-        finally:
-            with self._state_lock:
-                if self._active_session_id == session_id:
-                    self._active_session_id = None
+        outcome = self._generate(session_id, adapter)
+        if outcome is None:
+            return
+        # MIDI is published. Optional jobs record failures per slot and
+        # must never rewrite the batch as a generation failure.
+        for item in outcome.items:
+            self._derived(session_id, item)
+        with ThreadPoolExecutor(
+            max_workers=self.max_audio_workers, thread_name_prefix="studio-audio"
+        ) as pool:
+            for future in [
+                pool.submit(self._audio, session_id, f"{item.index + 1:02d}", adapter)
+                for item in outcome.items
+            ]:
+                future.result()
+
+    def _start(self, session_id, work, *, on_event=None):
+        """Run `work` on a one-shot worker; the caller holds the state lock."""
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="studio-run")
+        self._executors[session_id] = executor
+        self._events[session_id] = Queue()
+        if on_event:
+            self._callbacks[session_id] = on_event
+        self._active_session_id = session_id
+
+        def run():
+            try:
+                work()
+            finally:
+                self._retire(session_id)
+
+        executor.submit(run)
+
+    def _retire(self, session_id):
+        # One locked step, so a new run for this session cannot interleave.
+        with self._state_lock:
+            self._active_session_id = None
+            self._events.pop(session_id, None)
+            self._callbacks.pop(session_id, None)
+            executor = self._executors.pop(session_id)
+        executor.shutdown(wait=False)
 
     def create_session(self, settings: SessionSettings, *, on_event=None):
         capability = (
@@ -370,66 +399,41 @@ class StudioService:
                 settings, core_version=CoreAdapter.core_version()
             )
             created = self.store.create(manifest)
-            if on_event:
-                self.subscribe(created.session_id, on_event)
-            self._events.setdefault(created.session_id, Queue())
             credentials = self.credentials.provider_credentials()
             root = self.store.session_dir(created.session_id, must_exist=True)
             adapter = self.adapter_factory(root, credentials)
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-batch"
+            self._start(
+                created.session_id,
+                lambda: self._run(created.session_id, adapter),
+                on_event=on_event,
             )
-            self._executors[created.session_id] = executor
-            self._active_session_id = created.session_id
-            self._futures[created.session_id] = {
-                "batch": executor.submit(self._run, created.session_id, adapter)
-            }
             return created
 
     start_generation = create_session
     generate = create_session
 
-    def wait(self, session_id, timeout=None):
-        for future in self._futures.get(session_id, {}).values():
-            future.result(timeout=timeout)
-        executor = self._executors.pop(session_id, None)
+    def wait(self, session_id):
+        """Block until the session's run (if any) ends, then load its manifest."""
+        with self._state_lock:
+            executor = self._executors.get(session_id)
         if executor:
             executor.shutdown(wait=True)
         return self.store.load(session_id)
 
     def retry_audio(self, session_id, slot_id):
-        manifest = self.store.load(session_id)
-        slot = manifest.slot(slot_id)
-        if slot.midi is not MidiState.READY or not slot.artifacts.midi:
-            raise ValueError("audio retry requires a valid persisted MIDI artifact")
-        if not slot.audio.retryable or slot.audio.state not in {
-            AudioState.FAILED,
-            AudioState.UNAVAILABLE,
-            AudioState.INTERRUPTED,
-        }:
-            raise ValueError("audio is not in a retryable state")
-        self.store.artifact_path(session_id, slot.artifacts.midi)
         with self._state_lock:
+            manifest = self.store.load(session_id)
+            slot = manifest.slot(slot_id)
+            if not slot.audio_retryable:
+                raise ValueError("audio is not in a retryable state")
+            self.store.artifact_path(session_id, slot.artifacts.midi)
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
             adapter = self.adapter_factory(
                 self.store.session_dir(session_id, must_exist=True),
                 self.credentials.provider_credentials(),
             )
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="studio-audio"
-            )
-            self._executors[session_id] = executor
-            self._active_session_id = session_id
-
-            def run():
-                try:
-                    self._audio(session_id, slot_id, adapter)
-                finally:
-                    with self._state_lock:
-                        self._active_session_id = None
-
-            self._futures[session_id] = {slot_id: executor.submit(run)}
+            self._start(session_id, lambda: self._audio(session_id, slot_id, adapter))
         return manifest
 
     rerender_audio = retry_audio
@@ -455,12 +459,12 @@ class StudioService:
                 )
             return self.store.set_favorite(session_id, slot_id, favorite)
 
-    def move_to_trash(self, session_id):
-        # Holding the state lock keeps a retry from starting mid-move.
+    def delete_session(self, session_id):
+        # Holding the state lock keeps a retry from starting mid-deletion.
         with self._state_lock:
             if self._active_session_id == session_id:
-                raise ActiveSessionError("an active session cannot be moved to trash")
-            return self.store.move_to_trash(session_id)
+                raise ActiveSessionError("an active session cannot be deleted")
+            return self.store.delete_session(session_id)
 
 
 __all__ = ["ActiveSessionError", "ServiceEvent", "StudioService"]
