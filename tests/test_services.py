@@ -346,7 +346,7 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     ids=["derived-save", "audio-start-save", "audio-result-save"],
 )
 def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
-    tmp_path, monkeypatch, fault, faulted
+    tmp_path, monkeypatch, caplog, fault, faulted
 ):
     service, adapters = make_service(tmp_path)
     save = service.store.save
@@ -359,10 +359,12 @@ def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
         return save(manifest)
 
     monkeypatch.setattr(service.store, "save", flaky_save)
-    created = service.create_session(settings())
-    result = service.wait(created.session_id)
+    with caplog.at_level("WARNING", logger="conductor_studio"):
+        created = service.create_session(settings())
+        result = service.wait(created.session_id)
 
     assert tripped
+    assert len(caplog.records) == 1
     assert result.batch.failure is None
     assert all(s.midi is MidiState.READY for s in result.slots)
     assert all(s.audio.state is AudioState.READY for s in result.slots[1:])
@@ -382,13 +384,30 @@ def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
     assert [adapter.batch_calls for adapter in adapters] == [1, 0]
 
 
-def test_audio_retry_final_save_fault_is_logged_and_stays_retryable(
+class NewPathAdapter(FakeAdapter):
+    """Writes each render under a new name, as Core's audio commit does."""
+
+    def render_audio(self, manifest, slot_id):
+        super().render_audio(manifest, slot_id)
+        path = f"variants/{slot_id}/preview-retry.mp3"
+        (self.root / path).write_bytes(b"ID3")
+        manifest.slot(slot_id).artifacts.audio = path
+
+
+def test_audio_retry_final_save_fault_keeps_the_rendered_reference(
     tmp_path, monkeypatch, caplog
 ):
-    service, adapters = make_service(tmp_path)
+    service, _ = make_service(tmp_path)
     created = service.create_session(settings())
     completed = service.wait(created.session_id)
     previous = completed.slot("03").artifacts.audio
+    retry_adapters = []
+
+    def factory(root, credentials):
+        retry_adapters.append(NewPathAdapter(root, credentials))
+        return retry_adapters[-1]
+
+    service.adapter_factory = factory
     completed.slot("03").audio = AudioInfo(
         state=AudioState.FAILED,
         failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
@@ -415,8 +434,9 @@ def test_audio_retry_final_save_fault_is_logged_and_stays_retryable(
     slot = result.slot("03")
     assert slot.audio.state is AudioState.FAILED
     assert slot.audio.retryable
-    assert slot.artifacts.audio == previous
-    assert adapters[-1].batch_calls == 0
+    # Core removes the replaced file, so the fallback must keep the new one.
+    assert slot.artifacts.audio == "variants/03/preview-retry.mp3" != previous
+    assert [adapter.batch_calls for adapter in retry_adapters] == [0]
     service.delete_session(created.session_id)
 
 

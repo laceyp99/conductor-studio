@@ -264,8 +264,14 @@ class StudioService:
 
         try:
             self._update_slot(session_id, item.index, change)
-        except Exception:
+        except Exception as error:
             # MIDI is already published; drop the optional references.
+            _LOGGER.warning(
+                "Saving derived artifacts failed for session %s slot %s: %s",
+                session_id,
+                slot_id,
+                _diagnostic(error),
+            )
             with suppress(Exception):
                 self._update_slot(
                     session_id,
