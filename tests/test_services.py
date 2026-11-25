@@ -380,3 +380,59 @@ def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
     retried = service.wait(created.session_id)
     assert retried.slot("01").audio.state is AudioState.READY
     assert [adapter.batch_calls for adapter in adapters] == [1, 0]
+
+
+def test_audio_retry_final_save_fault_is_logged_and_stays_retryable(
+    tmp_path, monkeypatch, caplog
+):
+    service, adapters = make_service(tmp_path)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    previous = completed.slot("03").artifacts.audio
+    completed.slot("03").audio = AudioInfo(
+        state=AudioState.FAILED,
+        failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+        retryable=True,
+    )
+    service.store.save(completed)
+    save = service.store.save
+    tripped = []
+
+    def flaky_save(manifest):
+        if not tripped and manifest.slot("03").audio.state is AudioState.READY:
+            tripped.append(True)
+            raise PermissionError(13, "Permission denied", "C:/private/manifest.json")
+        return save(manifest)
+
+    monkeypatch.setattr(service.store, "save", flaky_save)
+    with caplog.at_level("WARNING", logger="conductor_studio"):
+        service.retry_audio(created.session_id, "03")
+        result = service.wait(created.session_id)
+
+    assert tripped
+    assert len(caplog.records) == 1
+    assert "private" not in caplog.text
+    slot = result.slot("03")
+    assert slot.audio.state is AudioState.FAILED
+    assert slot.audio.retryable
+    assert slot.artifacts.audio == previous
+    assert adapters[-1].batch_calls == 0
+    service.delete_session(created.session_id)
+
+
+def test_unexpected_worker_error_is_logged_and_releases_the_session(tmp_path, caplog):
+    service, _ = make_service(tmp_path)
+
+    def work():
+        raise RuntimeError("worker broke reading C:/private/loop.json")
+
+    with caplog.at_level("ERROR", logger="conductor_studio"):
+        with service._state_lock:
+            service._start("session", work)
+            executor = service._executors["session"]
+        executor.shutdown(wait=True)
+
+    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    assert "worker broke" in caplog.text
+    assert "private" not in caplog.text
+    assert service._active_session_id is None

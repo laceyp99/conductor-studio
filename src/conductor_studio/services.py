@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from queue import Empty, Queue
 
 from .catalog import ModelCatalog
 from .core_adapter import AdapterFailure, CoreAdapter, NormalizedBatchResult
+from .core_adapter import _failure as _adapter_failure
 from .credentials import CredentialStore
 from .models import (
     AudioInfo,
@@ -29,6 +31,14 @@ from .models import (
 from .piano_roll import render_loop
 from .storage import SessionStore
 from .variation import create_manifest
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _diagnostic(error: BaseException) -> str:
+    """Return the adapter's redacted, path-free error text for logs."""
+    return _adapter_failure(error).diagnostic
+
 
 DERIVED_WARNING = "Piano-roll rendering failed; MIDI is still available."
 AUDIO_FAILURE = AudioInfo(
@@ -299,8 +309,14 @@ class StudioService:
                 local.slot(slot_id).audio = AUDIO_FAILURE.model_copy()
             rendered = local.slot(slot_id)
             publish(rendered.audio, rendered.artifacts)
-        except Exception:
+        except Exception as error:
             # A storage fault must not strand the slot as rendering or untried.
+            _LOGGER.warning(
+                "Saving audio state failed for session %s slot %s: %s",
+                session_id,
+                slot_id,
+                _diagnostic(error),
+            )
             with suppress(Exception):
                 publish(AUDIO_FAILURE, rendered and rendered.artifacts)
 
@@ -370,6 +386,13 @@ class StudioService:
         def run():
             try:
                 work()
+            except Exception as error:
+                # The future is discarded, so this is the only trace of the error.
+                _LOGGER.error(
+                    "Studio worker failed for session %s: %s",
+                    session_id,
+                    _diagnostic(error),
+                )
             finally:
                 self._retire(session_id)
 
