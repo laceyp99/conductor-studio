@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from queue import Empty, Queue
 
 from .catalog import ModelCatalog
 from .core_adapter import AdapterFailure, CoreAdapter, NormalizedBatchResult
+from .core_adapter import _failure as _adapter_failure
 from .credentials import CredentialStore
 from .models import (
     AudioInfo,
@@ -29,6 +31,24 @@ from .models import (
 from .piano_roll import render_loop
 from .storage import SessionStore
 from .variation import create_manifest
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _diagnostic(error: BaseException) -> str:
+    """Return the adapter's redacted, path-free error text for logs."""
+    return _adapter_failure(error).diagnostic
+
+
+DERIVED_WARNING = "Piano-roll rendering failed; MIDI is still available."
+AUDIO_FAILURE = AudioInfo(
+    state=AudioState.FAILED,
+    failure=FailureInfo(
+        category=ErrorCategory.AUDIO,
+        message="Audio rendering failed; MIDI is still available.",
+    ),
+    retryable=True,
+)
 
 
 class ActiveSessionError(RuntimeError):
@@ -232,52 +252,89 @@ class StudioService:
             image = self.renderer(item.loop, root / "piano-roll.png")
             image_ref = f"variants/{slot_id}/{Path(image).name}"
         except Exception:
-            warning = "Piano-roll rendering failed; MIDI is still available."
-        with self._coordinator_lock:
-            manifest = self.store.load(session_id)
-            data = manifest.model_dump(mode="python")
-            slot = data["slots"][item.index]
+            warning = DERIVED_WARNING
+
+        def change(slot):
             if loop_ref:
                 slot["artifacts"]["loop"] = loop_ref
             if image_ref:
                 slot["artifacts"]["piano_roll"] = image_ref
             if warning:
                 slot["warnings"].append(warning)
-            self.store.save(SessionManifest.model_validate(data))
+
+        try:
+            self._update_slot(session_id, item.index, change)
+        except Exception as error:
+            # MIDI is already published; drop the optional references.
+            _LOGGER.warning(
+                "Saving derived artifacts failed for session %s slot %s: %s",
+                session_id,
+                slot_id,
+                _diagnostic(error),
+            )
+            with suppress(Exception):
+                self._update_slot(
+                    session_id,
+                    item.index,
+                    lambda slot: slot["warnings"].append(DERIVED_WARNING),
+                )
+
+    def _update_slot(self, session_id, index, mutate):
+        """Apply one slot mutation to the latest manifest and persist it."""
+        with self._coordinator_lock:
+            current = self.store.load(session_id)
+
+            def change(data):
+                mutate(data["slots"][index])
+
+            return self.store.save(self._changed(current, change))
 
     def _audio(self, session_id, slot_id, adapter):
-        with self._coordinator_lock:
-            current = self.store.load(session_id)
-            data = current.model_dump(mode="python")
-            target = data["slots"][int(slot_id) - 1]
-            target["audio"] = AudioInfo(state=AudioState.RENDERING).model_dump(
-                mode="python"
-            )
-            local = self.store.save(SessionManifest.model_validate(data))
-        self._emit(local)
-        local = local.model_copy(deep=True)
-        try:
-            adapter.render_audio(local, slot_id)
-        except Exception:
-            local.slot(slot_id).audio = AudioInfo(
-                state=AudioState.FAILED,
-                failure=FailureInfo(
-                    category=ErrorCategory.AUDIO,
-                    message="Audio rendering failed; MIDI is still available.",
-                ),
-                retryable=True,
-            )
-        with self._coordinator_lock:
-            current = self.store.load(session_id)
-            data = current.model_dump(mode="python")
-            source = local.slot(slot_id)
-            target = data["slots"][int(slot_id) - 1]
-            target["audio"] = source.audio.model_dump(mode="python")
-            target["artifacts"]["audio"] = source.artifacts.audio
-            saved = self.store.save(SessionManifest.model_validate(data))
-        self._emit(saved)
+        """Render one slot's audio; any failure leaves a retryable state."""
+        index = int(slot_id) - 1
+        rendered = None  # the slot as the renderer left it, once known
 
-    def _run(self, session_id, adapter):
+        def publish(audio, artifacts=None):
+            # Without artifacts the saved audio reference is left as is, so a
+            # re-render keeps the previous audio until Core commits new audio.
+            def change(slot):
+                slot["audio"] = audio.model_dump(mode="python")
+                if artifacts is not None:
+                    slot["artifacts"]["audio"] = artifacts.audio
+
+            saved = self._update_slot(session_id, index, change)
+            self._emit(saved)
+            return saved
+
+        try:
+            local = publish(AudioInfo(state=AudioState.RENDERING))
+            local = local.model_copy(deep=True)
+            try:
+                adapter.render_audio(local, slot_id)
+            except Exception:
+                local.slot(slot_id).audio = AUDIO_FAILURE.model_copy()
+            rendered = local.slot(slot_id)
+            publish(rendered.audio, rendered.artifacts)
+        except Exception as error:
+            # A storage fault must not strand the slot as rendering or untried.
+            _LOGGER.warning(
+                "Saving audio state failed for session %s slot %s: %s",
+                session_id,
+                slot_id,
+                _diagnostic(error),
+            )
+            # Retry the renderer's real result once, since Core may already have
+            # committed a playable file; only then fall back to a retryable fail.
+            attempts = [(AUDIO_FAILURE, rendered and rendered.artifacts)]
+            if rendered is not None:
+                attempts.insert(0, (rendered.audio, rendered.artifacts))
+            for audio, artifacts in attempts:
+                with suppress(Exception):
+                    publish(audio, artifacts)
+                    return
+
+    def _generate(self, session_id, adapter):
+        """Run the one provider batch; return the published result or None."""
         try:
             outcome = adapter.generate_batch(
                 self.store.load(session_id),
@@ -285,7 +342,7 @@ class StudioService:
             )
             if isinstance(outcome, AdapterFailure):
                 self._failure(session_id, outcome.failure, outcome)
-                return
+                return None
             if (
                 not isinstance(outcome, NormalizedBatchResult)
                 or len(outcome.items) != 4
@@ -297,18 +354,9 @@ class StudioService:
                         message="The generation batch was invalid.",
                     ),
                 )
-                return
-            published = self._success(session_id, outcome)
-            for item in outcome.items:
-                self._derived(session_id, item)
-            with ThreadPoolExecutor(
-                max_workers=self.max_audio_workers, thread_name_prefix="studio-audio"
-            ) as pool:
-                for future in [
-                    pool.submit(self._audio, session_id, s.slot_id, adapter)
-                    for s in published.slots
-                ]:
-                    future.result()
+                return None
+            self._success(session_id, outcome)
+            return outcome
         except Exception as error:
             with suppress(Exception):  # the original persistence error wins
                 self._failure(
@@ -320,6 +368,24 @@ class StudioService:
                         message="Generation failed.",
                     ),
                 )
+            return None
+
+    def _run(self, session_id, adapter):
+        outcome = self._generate(session_id, adapter)
+        if outcome is None:
+            return
+        # MIDI is published. Optional jobs record failures per slot and
+        # must never rewrite the batch as a generation failure.
+        for item in outcome.items:
+            self._derived(session_id, item)
+        with ThreadPoolExecutor(
+            max_workers=self.max_audio_workers, thread_name_prefix="studio-audio"
+        ) as pool:
+            for future in [
+                pool.submit(self._audio, session_id, f"{item.index + 1:02d}", adapter)
+                for item in outcome.items
+            ]:
+                future.result()
 
     def _start(self, session_id, work, *, on_event=None):
         """Run `work` on a one-shot worker; the caller holds the state lock."""
@@ -333,6 +399,13 @@ class StudioService:
         def run():
             try:
                 work()
+            except Exception as error:
+                # The future is discarded, so this is the only trace of the error.
+                _LOGGER.error(
+                    "Studio worker failed for session %s: %s",
+                    session_id,
+                    _diagnostic(error),
+                )
             finally:
                 self._retire(session_id)
 

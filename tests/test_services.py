@@ -334,3 +334,132 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     assert [sorted(adapter.audio_calls) for adapter in adapters] == [
         ["01", "02", "03", "04"]
     ]
+
+
+@pytest.mark.parametrize(
+    ("fault", "faulted"),
+    [
+        (lambda s: s.artifacts.loop is not None, "derived"),
+        (lambda s: s.audio.state is AudioState.RENDERING, "audio"),
+        (lambda s: s.audio.state is AudioState.READY, "saved-on-retry"),
+    ],
+    ids=["derived-save", "audio-start-save", "audio-result-save"],
+)
+def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
+    tmp_path, monkeypatch, caplog, fault, faulted
+):
+    service, adapters = make_service(tmp_path)
+    save = service.store.save
+    tripped = []
+
+    def flaky_save(manifest):
+        if not tripped and fault(manifest.slot("01")):
+            tripped.append(True)
+            raise OSError("disk briefly unavailable")
+        return save(manifest)
+
+    monkeypatch.setattr(service.store, "save", flaky_save)
+    with caplog.at_level("WARNING", logger="conductor_studio"):
+        created = service.create_session(settings())
+        result = service.wait(created.session_id)
+
+    assert tripped
+    assert len(caplog.records) == 1
+    assert result.batch.failure is None
+    assert all(s.midi is MidiState.READY for s in result.slots)
+    assert all(s.audio.state is AudioState.READY for s in result.slots[1:])
+    first = result.slot("01")
+    if faulted == "derived":
+        assert first.artifacts.loop is None
+        assert first.warnings == [
+            "Piano-roll rendering failed; MIDI is still available."
+        ]
+        assert first.audio.state is AudioState.READY
+        return
+    if faulted == "saved-on-retry":
+        # A one-time fault after a successful render keeps the real result.
+        assert first.audio.state is AudioState.READY
+        assert first.artifacts.audio
+        assert [adapter.batch_calls for adapter in adapters] == [1]
+        return
+    assert first.audio.state is AudioState.FAILED
+    assert first.audio.retryable
+    service.retry_audio(created.session_id, "01")
+    retried = service.wait(created.session_id)
+    assert retried.slot("01").audio.state is AudioState.READY
+    assert [adapter.batch_calls for adapter in adapters] == [1, 0]
+
+
+class NewPathAdapter(FakeAdapter):
+    """Writes each render under a new name, as Core's audio commit does."""
+
+    def render_audio(self, manifest, slot_id):
+        super().render_audio(manifest, slot_id)
+        path = f"variants/{slot_id}/preview-retry.mp3"
+        (self.root / path).write_bytes(b"ID3")
+        manifest.slot(slot_id).artifacts.audio = path
+
+
+def test_audio_retry_final_save_fault_keeps_the_rendered_reference(
+    tmp_path, monkeypatch, caplog
+):
+    service, _ = make_service(tmp_path)
+    created = service.create_session(settings())
+    completed = service.wait(created.session_id)
+    previous = completed.slot("03").artifacts.audio
+    retry_adapters = []
+
+    def factory(root, credentials):
+        retry_adapters.append(NewPathAdapter(root, credentials))
+        return retry_adapters[-1]
+
+    service.adapter_factory = factory
+    completed.slot("03").audio = AudioInfo(
+        state=AudioState.FAILED,
+        failure=FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+        retryable=True,
+    )
+    service.store.save(completed)
+    save = service.store.save
+    tripped = []
+
+    def ready_save_denied(manifest):
+        if manifest.slot("03").audio.state is AudioState.READY:
+            tripped.append(True)
+            raise PermissionError(13, "Permission denied", "C:/private/manifest.json")
+        return save(manifest)
+
+    monkeypatch.setattr(service.store, "save", ready_save_denied)
+    with caplog.at_level("WARNING", logger="conductor_studio"):
+        service.retry_audio(created.session_id, "03")
+        result = service.wait(created.session_id)
+
+    # The result save and its one retry both fail, then the fallback lands.
+    assert len(tripped) == 2
+    assert len(caplog.records) == 1
+    assert "private" not in caplog.text
+    slot = result.slot("03")
+    assert slot.audio.state is AudioState.FAILED
+    assert slot.audio.retryable
+    # Core removes the replaced file, so the fallback must keep the new one.
+    assert slot.artifacts.audio == "variants/03/preview-retry.mp3" != previous
+    assert [adapter.batch_calls for adapter in retry_adapters] == [0]
+    service.delete_session(created.session_id)
+
+
+def test_unexpected_worker_error_is_logged_and_releases_the_session(tmp_path, caplog):
+    service, _ = make_service(tmp_path)
+
+    def work():
+        raise RuntimeError("worker broke reading C:/private/loop.json")
+
+    with caplog.at_level("ERROR", logger="conductor_studio"):
+        with service._state_lock:
+            service._start("session", work)
+            executor = service._executors["session"]
+        executor.shutdown(wait=True)
+
+    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    assert "worker broke" in caplog.text
+    assert "private" not in caplog.text
+    assert service._active_session_id is None
