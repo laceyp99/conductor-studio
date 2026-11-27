@@ -14,8 +14,12 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from .catalog import ModelCatalog
-from .core_adapter import AdapterFailure, CoreAdapter, NormalizedBatchResult
-from .core_adapter import _failure as _adapter_failure
+from .core_adapter import (
+    AdapterFailure,
+    CoreAdapter,
+    NormalizedBatchResult,
+    diagnostic,
+)
 from .credentials import CredentialStore
 from .models import (
     AudioInfo,
@@ -33,11 +37,6 @@ from .storage import SessionStore
 from .variation import create_manifest
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _diagnostic(error: BaseException) -> str:
-    """Return the adapter's redacted, path-free error text for logs."""
-    return _adapter_failure(error).diagnostic
 
 
 DERIVED_WARNING = "Piano-roll rendering failed; MIDI is still available."
@@ -270,7 +269,7 @@ class StudioService:
                 "Saving derived artifacts failed for session %s slot %s: %s",
                 session_id,
                 slot_id,
-                _diagnostic(error),
+                diagnostic(error),
             )
             with suppress(Exception):
                 self._update_slot(
@@ -321,17 +320,18 @@ class StudioService:
                 "Saving audio state failed for session %s slot %s: %s",
                 session_id,
                 slot_id,
-                _diagnostic(error),
+                diagnostic(error),
             )
-            # Retry the renderer's real result once, since Core may already have
-            # committed a playable file; only then fall back to a retryable fail.
-            attempts = [(AUDIO_FAILURE, rendered and rendered.artifacts)]
+            # Core may already have committed a playable file, so retry saving
+            # the renderer's real result once.
             if rendered is not None:
-                attempts.insert(0, (rendered.audio, rendered.artifacts))
-            for audio, artifacts in attempts:
                 with suppress(Exception):
-                    publish(audio, artifacts)
+                    publish(rendered.audio, rendered.artifacts)
                     return
+            # Fall back to a retryable failure. Keep the reference the renderer
+            # reported, because Core removes the replaced file once it commits.
+            with suppress(Exception):
+                publish(AUDIO_FAILURE, rendered.artifacts if rendered else None)
 
     def _generate(self, session_id, adapter):
         """Run the one provider batch; return the published result or None."""
@@ -358,6 +358,9 @@ class StudioService:
             self._success(session_id, outcome)
             return outcome
         except Exception as error:
+            _LOGGER.warning(
+                "Generation failed for session %s: %s", session_id, diagnostic(error)
+            )
             with suppress(Exception):  # the original persistence error wins
                 self._failure(
                     session_id,
@@ -404,7 +407,7 @@ class StudioService:
                 _LOGGER.error(
                     "Studio worker failed for session %s: %s",
                     session_id,
-                    _diagnostic(error),
+                    diagnostic(error),
                 )
             finally:
                 self._retire(session_id)
