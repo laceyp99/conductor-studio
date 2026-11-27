@@ -198,6 +198,28 @@ def test_batch_failure_persists_reported_accounting(tmp_path):
     ) == (0.12, 10, 20, 30)
 
 
+def test_generation_save_fault_is_logged_and_fails_the_batch(
+    tmp_path, monkeypatch, caplog
+):
+    service, adapters = make_service(tmp_path)
+    save = service.store.save
+
+    def publish_denied(manifest):
+        if manifest.batch.generation_ids:
+            raise OSError(28, "No space left", "C:/private/session.json")
+        return save(manifest)
+
+    monkeypatch.setattr(service.store, "save", publish_denied)
+    with caplog.at_level("WARNING", logger="conductor_studio"):
+        result = service.wait(service.create_session(settings()).session_id)
+
+    assert result.batch.failure.category is ErrorCategory.STORAGE
+    assert [adapter.batch_calls for adapter in adapters] == [1]
+    assert len(caplog.records) == 1
+    assert "No space left" in caplog.text
+    assert "private" not in caplog.text
+
+
 def test_active_lock_includes_all_concurrent_audio(tmp_path):
     gate = threading.Event()
     service, adapters = make_service(tmp_path, gate=gate)

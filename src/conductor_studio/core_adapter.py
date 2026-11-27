@@ -145,6 +145,11 @@ def _accounting(result: Any) -> dict[str, Any]:
     }
 
 
+def diagnostic(error: BaseException) -> str:
+    """Return the redacted, path-free error text that is safe to log."""
+    return f"{type(error).__name__}: {_safe(_path_free(error), 1000)}"
+
+
 def _failure(error: BaseException) -> AdapterFailure:
     name, detail = type(error).__name__.lower(), str(error).lower()
     if isinstance(error, conductor_core.ProviderContextLengthError):
@@ -204,8 +209,7 @@ def _failure(error: BaseException) -> AdapterFailure:
     else:
         category, message = ErrorCategory.UNKNOWN, "Generation failed."
     return AdapterFailure(
-        FailureInfo(category=category, message=message),
-        f"{type(error).__name__}: {_safe(_path_free(error), 1000)}",
+        FailureInfo(category=category, message=message), diagnostic(error)
     )
 
 
@@ -418,7 +422,7 @@ class CoreAdapter:
             )
             return relative
         except Exception as error:
-            self.last_diagnostic = _failure(error).diagnostic
+            self.last_diagnostic = diagnostic(error)
             _LOGGER.warning(
                 "Audio rendering failed for slot %s: %s", slot_id, self.last_diagnostic
             )
