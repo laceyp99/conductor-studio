@@ -323,8 +323,15 @@ class StudioService:
                 slot_id,
                 _diagnostic(error),
             )
-            with suppress(Exception):
-                publish(AUDIO_FAILURE, rendered and rendered.artifacts)
+            # Retry the renderer's real result once, since Core may already have
+            # committed a playable file; only then fall back to a retryable fail.
+            attempts = [(AUDIO_FAILURE, rendered and rendered.artifacts)]
+            if rendered is not None:
+                attempts.insert(0, (rendered.audio, rendered.artifacts))
+            for audio, artifacts in attempts:
+                with suppress(Exception):
+                    publish(audio, artifacts)
+                    return
 
     def _generate(self, session_id, adapter):
         """Run the one provider batch; return the published result or None."""

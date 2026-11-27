@@ -341,7 +341,7 @@ def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     [
         (lambda s: s.artifacts.loop is not None, "derived"),
         (lambda s: s.audio.state is AudioState.RENDERING, "audio"),
-        (lambda s: s.audio.state is AudioState.READY, "audio"),
+        (lambda s: s.audio.state is AudioState.READY, "saved-on-retry"),
     ],
     ids=["derived-save", "audio-start-save", "audio-result-save"],
 )
@@ -375,6 +375,12 @@ def test_post_publication_save_fault_keeps_midi_and_audio_recoverable(
             "Piano-roll rendering failed; MIDI is still available."
         ]
         assert first.audio.state is AudioState.READY
+        return
+    if faulted == "saved-on-retry":
+        # A one-time fault after a successful render keeps the real result.
+        assert first.audio.state is AudioState.READY
+        assert first.artifacts.audio
+        assert [adapter.batch_calls for adapter in adapters] == [1]
         return
     assert first.audio.state is AudioState.FAILED
     assert first.audio.retryable
@@ -417,18 +423,19 @@ def test_audio_retry_final_save_fault_keeps_the_rendered_reference(
     save = service.store.save
     tripped = []
 
-    def flaky_save(manifest):
-        if not tripped and manifest.slot("03").audio.state is AudioState.READY:
+    def ready_save_denied(manifest):
+        if manifest.slot("03").audio.state is AudioState.READY:
             tripped.append(True)
             raise PermissionError(13, "Permission denied", "C:/private/manifest.json")
         return save(manifest)
 
-    monkeypatch.setattr(service.store, "save", flaky_save)
+    monkeypatch.setattr(service.store, "save", ready_save_denied)
     with caplog.at_level("WARNING", logger="conductor_studio"):
         service.retry_audio(created.session_id, "03")
         result = service.wait(created.session_id)
 
-    assert tripped
+    # The result save and its one retry both fail, then the fallback lands.
+    assert len(tripped) == 2
     assert len(caplog.records) == 1
     assert "private" not in caplog.text
     slot = result.slot("03")
