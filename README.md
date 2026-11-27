@@ -115,9 +115,9 @@ automatically.
    validation and are saved atomically.
 4. Cost and available input, output, and total token counts are recorded once
    for the batch and displayed beneath its cards.
-5. A provider, validation, or persistence error fails the entire batch with one
-   sanitized error. Start a new session to try generation again; Studio never
-   repeats the provider request within an existing session.
+5. A provider, validation, or persistence error during generation fails the
+   entire batch with one sanitized error. Start a new session to try generation
+   again; Studio never repeats the provider request within an existing session.
 6. Reopen completed batches from History without provider activity. Favorite
    individual variations from their cards once saved MIDI is available.
    Favorites presents one loop with a scrollable list on the right, ordered
