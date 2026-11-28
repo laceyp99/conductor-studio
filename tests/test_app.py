@@ -559,6 +559,61 @@ def test_card_offers_retry_for_unavailable_audio_once_midi_is_saved():
     assert _card_view(manifest, slot, blank).audio_retry_visible is True
 
 
+def test_card_offers_retry_only_when_ready_audio_file_is_missing(tmp_path):
+    manifest = create_manifest(
+        SessionSettings(prompt="motif", provider="OpenAI", model="test"),
+        core_version="0.5.3",
+    )
+    slot = manifest.slot("01")
+    slot.state, slot.midi = SlotState.SUCCEEDED, MidiState.READY
+    slot.artifacts.midi = "core/generations/gen-0/loop.mid"
+    slot.artifacts.audio = "core/generations/gen-0/audio.mp3"
+    slot.audio = AudioInfo(state=AudioState.READY)
+    files = {slot.artifacts.midi: tmp_path / "loop.mid"}
+
+    def artifact_path(session_id, reference):
+        if reference not in files:
+            raise ContainmentError("missing")
+        return files[reference]
+
+    store = SimpleNamespace(artifact_path=artifact_path)
+    lost = {"piano_roll": None, "audio": None, "midi": files[slot.artifacts.midi]}
+    card = _card_view(manifest, slot, lost, store)
+    assert card.audio_retry_visible is True
+    assert "Unavailable: audio preview." in card.warning
+
+    files[slot.artifacts.audio] = tmp_path / "audio.mp3"
+    playable = {**lost, "audio": files[slot.artifacts.audio]}
+    assert _card_view(manifest, slot, playable, store).audio_retry_visible is False
+
+
+@pytest.mark.parametrize("state", [AudioState.READY, AudioState.FAILED])
+def test_card_hides_retry_when_saved_midi_is_missing(state):
+    manifest = create_manifest(
+        SessionSettings(prompt="motif", provider="OpenAI", model="test"),
+        core_version="0.5.3",
+    )
+    slot = manifest.slot("01")
+    slot.state, slot.midi = SlotState.SUCCEEDED, MidiState.READY
+    slot.artifacts.midi = "core/generations/gen-0/loop.mid"
+    slot.artifacts.audio = "core/generations/gen-0/audio.mp3"
+    slot.audio = AudioInfo(
+        state=state,
+        failure=None
+        if state is AudioState.READY
+        else FailureInfo(category=ErrorCategory.AUDIO, message="failed"),
+    )
+
+    def artifact_path(session_id, reference):
+        raise ContainmentError("missing")
+
+    store = SimpleNamespace(artifact_path=artifact_path)
+    blank = {"piano_roll": None, "audio": None, "midi": None}
+    card = _card_view(manifest, slot, blank, store)
+    assert card.audio_retry_visible is False
+    assert "MIDI" in card.warning
+
+
 def _capability(
     model,
     mode="temperature",

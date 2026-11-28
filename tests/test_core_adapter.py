@@ -447,8 +447,10 @@ def test_request_sends_context_window_and_thinking_temperature(tmp_path):
     assert (fixed_request.effort, fixed_request.temperature) == ("high", 1.0)
 
 
+# A re-render must also work when the user already deleted the previous MP3.
+@pytest.mark.parametrize("delete_first", [False, True])
 def test_audio_render_commits_through_core_with_a_new_name_each_time(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, delete_first
 ):
     _fake_provider(monkeypatch)
     adapter = CoreAdapter(tmp_path, default_soundfont_path="x.sf2")
@@ -478,6 +480,8 @@ def test_audio_render_commits_through_core_with_a_new_name_each_time(
     slot = manifest.slot("04")
 
     first = adapter.render_audio(manifest, "04")
+    if delete_first:
+        (tmp_path / first).unlink()
     second = adapter.render_audio(manifest, "04")
 
     generation = (tmp_path / outcome.items[3].midi_path).parent
