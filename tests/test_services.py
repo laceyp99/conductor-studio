@@ -347,6 +347,18 @@ def test_session_cannot_be_deleted_while_audio_retry_renders(tmp_path):
     assert not service.store.session_dir(created.session_id).exists()
 
 
+def test_ready_audio_with_a_missing_file_re_renders_without_provider(tmp_path):
+    service, adapters = make_service(tmp_path)
+    created = service.create_session(settings())
+    ready = service.wait(created.session_id).slot("01")
+    preview = service.store.artifact_path(created.session_id, ready.artifacts.audio)
+    preview.unlink()
+    service.retry_audio(created.session_id, "01")
+    service.wait(created.session_id)
+    assert (adapters[-1].batch_calls, adapters[-1].audio_calls) == (0, ["01"])
+    assert preview.is_file()
+
+
 def test_audio_retry_rejects_ready_audio_with_a_state_reason(tmp_path):
     service, adapters = make_service(tmp_path)
     created = service.create_session(settings())

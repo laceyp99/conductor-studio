@@ -192,6 +192,8 @@ def _card_view(
     published: dict[str, Path | None],
     store: Any | None = None,
 ) -> CardView:
+    from .services import audio_retry_allowed
+
     progress = slot.progress
     fraction = (
         f" · {round(progress.fraction * 100):d}%"
@@ -257,7 +259,9 @@ def _card_view(
         _slot_metadata(manifest),
         "\n".join(dict.fromkeys(warnings)),
         "★ Favorited" if slot.favorite else "☆ Favorite",
-        slot.audio_retryable,
+        audio_retry_allowed(store, manifest.session_id, slot)
+        if store is not None
+        else slot.audio_retryable,
         slot.favorite or bool(store and favorite_eligible(manifest, slot, store)),
         figure,
     )

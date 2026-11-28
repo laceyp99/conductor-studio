@@ -127,8 +127,9 @@ automatically.
    Changing loops stops playback; audio never starts automatically. Missing
    files remain listed with a warning, and can still be unfavorited. After
    restoring a file, **Refresh media** rechecks the selected loop. **Retry
-   audio** re-renders a missing preview from saved MIDI, for example after
-   installing FluidSynth or FFmpeg; it never makes an LLM request.
+   audio** re-renders a failed or missing preview from saved MIDI, for example
+   after installing FluidSynth or FFmpeg or after the MP3 was deleted; it never
+   makes an LLM request.
 
 Piano rolls in results and Favorites support zoom, pan, and note hover showing
 pitch, MIDI number, velocity, bar/beat position, and duration. Pitch-axis labels

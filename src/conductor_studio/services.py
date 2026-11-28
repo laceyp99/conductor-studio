@@ -30,10 +30,11 @@ from .models import (
     SessionManifest,
     SessionSettings,
     SlotState,
+    VariantSlot,
     utc_now,
 )
 from .piano_roll import render_loop
-from .storage import SessionStore
+from .storage import SessionStore, StorageError
 from .variation import create_manifest
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,26 @@ AUDIO_FAILURE = AudioInfo(
     ),
     retryable=True,
 )
+
+
+def audio_retry_allowed(
+    store: SessionStore, session_id: str, slot: VariantSlot
+) -> bool:
+    """Whether a slot's audio may be rendered again from its saved MIDI.
+
+    Ready audio whose file is gone counts too, so a lost preview can be
+    recovered without a new generation. The card and the service both call
+    this, so the button never offers a retry the service would reject.
+    """
+    if slot.audio_retryable:
+        return True
+    if slot.audio.state is not AudioState.READY or not slot.artifacts.midi:
+        return False
+    try:
+        store.artifact_path(session_id, slot.artifacts.audio)
+    except (StorageError, OSError):
+        return True
+    return False
 
 
 class ActiveSessionError(RuntimeError):
@@ -463,7 +484,7 @@ class StudioService:
         with self._state_lock:
             manifest = self.store.load(session_id)
             slot = manifest.slot(slot_id)
-            if not slot.audio_retryable:
+            if not audio_retry_allowed(self.store, session_id, slot):
                 raise ValueError("audio is not in a retryable state")
             self.store.artifact_path(session_id, slot.artifacts.midi)
             if self._active_session_id is not None:
