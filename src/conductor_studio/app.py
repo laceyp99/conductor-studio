@@ -337,7 +337,7 @@ def _audio_retry_notice(error: Exception) -> str:
     if isinstance(error, ActiveSessionError):
         return "Another generation is running. Retry audio when it finishes."
     if isinstance(error, ValueError):
-        return "Audio retry needs saved MIDI and a failed, unavailable, or interrupted render."
+        return "Audio retry needs saved MIDI and a failed, unavailable, interrupted, or missing preview."
     if isinstance(error, ContainmentError):
         return "The saved MIDI file is missing, so audio cannot be retried."
     return "Audio retry could not start. Check the local audio tools."

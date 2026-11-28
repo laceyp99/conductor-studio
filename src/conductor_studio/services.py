@@ -58,7 +58,8 @@ def audio_retry_allowed(
 
     Ready audio whose file is gone counts too, so a lost preview can be
     recovered without a new generation. The card and the service both call
-    this, so the button never offers a retry the service would reject.
+    this so they agree on state. Like the other retryable states, it does not
+    check the MIDI file; `retry_audio` rejects a missing one with a notice.
     """
     if slot.audio_retryable:
         return True
