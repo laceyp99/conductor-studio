@@ -57,19 +57,24 @@ def audio_retry_allowed(
     """Whether a slot's audio may be rendered again from its saved MIDI.
 
     Ready audio whose file is gone counts too, so a lost preview can be
-    recovered without a new generation. The card and the service both call
-    this so they agree on state. Like the other retryable states, it does not
-    check the MIDI file; `retry_audio` rejects a missing one with a notice.
+    recovered without a new generation. Every case needs the saved MIDI file,
+    so the card never offers a retry that can only fail; after a MIDI file is
+    restored, refreshing the card offers retry again. The card and the service
+    both call this so they agree.
     """
-    if slot.audio_retryable:
+
+    def servable(reference: str | None) -> bool:
+        try:
+            store.artifact_path(session_id, reference or "")
+        except (StorageError, OSError):
+            return False
         return True
-    if slot.audio.state is not AudioState.READY or not slot.artifacts.midi:
+
+    if not slot.audio_retryable and slot.audio.state is not AudioState.READY:
         return False
-    try:
-        store.artifact_path(session_id, slot.artifacts.audio)
-    except (StorageError, OSError):
-        return True
-    return False
+    if not servable(slot.artifacts.midi):
+        return False
+    return slot.audio_retryable or not servable(slot.artifacts.audio)
 
 
 class ActiveSessionError(RuntimeError):
@@ -485,9 +490,12 @@ class StudioService:
         with self._state_lock:
             manifest = self.store.load(session_id)
             slot = manifest.slot(slot_id)
+            # Check MIDI first so a missing file gets its own notice, for
+            # example from a tab opened before the file disappeared.
+            if slot.artifacts.midi:
+                self.store.artifact_path(session_id, slot.artifacts.midi)
             if not audio_retry_allowed(self.store, session_id, slot):
                 raise ValueError("audio is not in a retryable state")
-            self.store.artifact_path(session_id, slot.artifacts.midi)
             if self._active_session_id is not None:
                 raise ActiveSessionError("a Studio generation is already active")
             adapter = self.adapter_factory(
